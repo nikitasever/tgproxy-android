@@ -26,7 +26,8 @@ jobs:
           EOF
 
       - name: Write version.json
-        run: echo '{"build_number": ${{ github.run_number }}}' > version.json
+        run: |
+          echo '{"build_number": ${{ github.run_number }}}' > version.json
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
