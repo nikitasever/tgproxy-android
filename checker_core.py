@@ -93,8 +93,8 @@ def _load_status():
         return {}
 
 
-def _save_status(working, error=None):
-    data = {"checked_at": time.time(), "working": working, "error": error}
+def _save_status(working_list, error=None):
+    data = {"checked_at": time.time(), "working_list": working_list, "error": error}
     with open(STATUS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f)
     return data
@@ -130,41 +130,58 @@ async def _check_one(api_id, api_hash, candidate):
     return ok
 
 
-async def _find_working(cfg, candidates):
-    for c in candidates:
-        ok = await _check_one(cfg["api_id"], cfg["api_hash"], c)
-        if ok:
-            return c
-    return None
+async def _find_all_working(cfg, candidates):
+    """Test every candidate concurrently (bounded) instead of stopping at the
+    first hit - lets the UI show a real list of working proxies to pick
+    from, not just one."""
+    sem = asyncio.Semaphore(5)
+
+    async def _bounded(c):
+        async with sem:
+            ok = await _check_one(cfg["api_id"], cfg["api_hash"], c)
+        return c if ok else None
+
+    results = await asyncio.gather(*[_bounded(c) for c in candidates])
+    working = [c for c in results if c]
+    working.sort(key=lambda c: c.get("latency_ms", 10 ** 9))
+    return working
 
 
 def run_check_cycle():
     """Fetch candidates, test them over whatever network is currently active
-    on this device, and persist the first working one to status.json.
-    Returns the working candidate dict, or None. On failure, the error is
-    saved to status.json (visible in the UI) instead of vanishing silently."""
+    on this device, and persist every working one (sorted by ping) to
+    status.json. Returns the list of working candidates (best first,
+    possibly empty). On failure, the error is saved to status.json (visible
+    in the UI) instead of vanishing silently."""
     try:
         cfg = load_config()
         candidates = fetch_candidates(cfg)
-        working = asyncio.run(_find_working(cfg, candidates))
+        working_list = asyncio.run(_find_all_working(cfg, candidates))
     except Exception as e:
         import traceback
         err_text = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-        _save_status(None, error=err_text)
+        _save_status([], error=err_text)
         raise
 
-    prev = _load_status().get("working")
-    _save_status(working)
+    prev_list = _load_status().get("working_list") or []
+    prev_best = prev_list[0] if prev_list else None
+    best = working_list[0] if working_list else None
 
-    is_new = working and (not prev or (prev["server"], prev["port"]) != (working["server"], working["port"]))
+    _save_status(working_list)
+
+    is_new = best and (not prev_best or (prev_best["server"], prev_best["port"]) != (best["server"], best["port"]))
     if is_new:
-        _notify_new_proxy(cfg, working)
+        _notify_new_proxy(cfg, best, len(working_list))
 
-    return working
+    return working_list
 
 
-def _notify_new_proxy(cfg, proxy):
-    link = f"https://t.me/proxy?server={proxy['server']}&port={proxy['port']}&secret={proxy['secret']}"
+def proxy_link(proxy):
+    return f"https://t.me/proxy?server={proxy['server']}&port={proxy['port']}&secret={proxy['secret']}"
+
+
+def _notify_new_proxy(cfg, proxy, total_count):
+    link = proxy_link(proxy)
     try:
         from plyer import notification
         notification.notify(
@@ -174,9 +191,10 @@ def _notify_new_proxy(cfg, proxy):
     except Exception as e:
         print(f"notification failed (running off-device?): {e}")
 
+    extra = f" (всего рабочих: {total_count})" if total_count > 1 else ""
     send_telegram_notify(
         cfg,
-        f"✅ Найден рабочий прокси для твоего устройства:\n"
+        f"✅ Найден рабочий прокси для твоего устройства{extra}:\n"
         f"{proxy['server']}:{proxy['port']} — пинг {proxy.get('latency_ms', '?')} мс\n\n{link}",
     )
     print(f"[tgproxy] new working proxy: {link}")

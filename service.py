@@ -59,24 +59,26 @@ def main_loop():
     while True:
         try:
             cfg = load_config()
-            prev_working = None
+            prev_best = None
             try:
                 from checker_core import _load_status
-                prev_working = _load_status().get("working")
+                prev_list = _load_status().get("working_list") or []
+                prev_best = prev_list[0] if prev_list else None
             except Exception:
                 pass
 
-            working = run_check_cycle()
+            working_list = run_check_cycle()
+            best = working_list[0] if working_list else None
 
-            if working:
-                is_new = not prev_working or (
-                    (prev_working["server"], prev_working["port"]) != (working["server"], working["port"])
+            if best:
+                is_new = not prev_best or (
+                    (prev_best["server"], prev_best["port"]) != (best["server"], best["port"])
                 )
                 if is_new:
-                    link = f"https://t.me/proxy?server={working['server']}&port={working['port']}&secret={working['secret']}"
+                    link = f"https://t.me/proxy?server={best['server']}&port={best['port']}&secret={best['secret']}"
                     notify_android(
                         "Найден рабочий прокси",
-                        f"{working['server']}:{working['port']} — тапни, чтобы подключить",
+                        f"{best['server']}:{best['port']} — тапни, чтобы подключить",
                         link,
                     )
         except Exception as e:
