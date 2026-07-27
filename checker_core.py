@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import ssl
 import time
 import urllib.request
@@ -11,13 +12,18 @@ from telethon.network.connection.tcpmtproxy import ConnectionTcpMTProxyRandomize
 
 APP_DIR = os.path.dirname(__file__)
 CONFIG_FILE = os.path.join(APP_DIR, "config.json")
+VERSION_FILE = os.path.join(APP_DIR, "version.json")
 STATUS_FILE = os.path.join(APP_DIR, "status.json")
 INSTALL_CODE_FILE = os.path.join(APP_DIR, "install_code.txt")
 CANDIDATES_CACHE_FILE = os.path.join(APP_DIR, "cached_candidates.json")
+LIVE_LOG_FILE = os.path.join(APP_DIR, "live_log.json")
+LIVE_LOG_MAX_LINES = 60
 
 RESULTS_URL_TEMPLATE = "https://{host}:8765/results.json?token={token}"
 NOTIFY_URL_TEMPLATE = "https://{host}:8765/notify?token={token}"
 BOT_USERNAME = "proxy_parserbot"
+GITHUB_REPO = "nikitasever/tgproxy-android"
+UPDATE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 # the results endpoint uses a self-signed cert (private token-protected
 # endpoint, not a public site) - skip verification instead of bundling a CA
@@ -98,6 +104,117 @@ def open_url_on_device(url):
         activity.startActivity(intent)
     except Exception as e:
         print(f"open_url_on_device unavailable (running off-device?): {e}")
+
+
+def bot_start_uri(install_code):
+    # tg:// is handled only by the Telegram app itself (never a browser) and
+    # doesn't need to resolve t.me over the network, so it isn't affected by
+    # a down/blocked VPN the way an https://t.me/... link would be
+    return f"tg://resolve?domain={BOT_USERNAME}&start={install_code}"
+
+
+def proxy_tg_uri(proxy):
+    return f"tg://proxy?server={proxy['server']}&port={proxy['port']}&secret={proxy['secret']}"
+
+
+def _log_reset():
+    with open(LIVE_LOG_FILE, "w", encoding="utf-8") as f:
+        json.dump({"checking": True, "lines": []}, f)
+
+
+def _log(line):
+    try:
+        with open(LIVE_LOG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = {"checking": True, "lines": []}
+    data["lines"] = (data.get("lines") or [])[-(LIVE_LOG_MAX_LINES - 1):] + [line]
+    with open(LIVE_LOG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+
+def _log_finish():
+    try:
+        with open(LIVE_LOG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = {"lines": []}
+    data["checking"] = False
+    with open(LIVE_LOG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+
+def load_live_log():
+    if not os.path.exists(LIVE_LOG_FILE):
+        return {"checking": False, "lines": []}
+    try:
+        with open(LIVE_LOG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"checking": False, "lines": []}
+
+
+def get_local_build_number():
+    if not os.path.exists(VERSION_FILE):
+        return 0
+    try:
+        with open(VERSION_FILE, "r", encoding="utf-8") as f:
+            return int(json.load(f).get("build_number", 0))
+    except Exception:
+        return 0
+
+
+def check_for_update():
+    """Look up the latest published GitHub Release and compare its build
+    number (baked into the release name at CI time) against this install's
+    own version.json. Returns (remote_build_number, apk_download_url) or
+    (None, None) on any failure - update checks are best-effort."""
+    try:
+        req = urllib.request.Request(UPDATE_API_URL, headers={"User-Agent": "tgproxycheck-app"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        m = re.search(r"build #(\d+)", data.get("name", ""))
+        remote_build = int(m.group(1)) if m else None
+        apk_url = next(
+            (a["browser_download_url"] for a in data.get("assets", []) if a["name"].endswith(".apk")),
+            None,
+        )
+        if remote_build is None or apk_url is None:
+            return None, None
+        return remote_build, apk_url
+    except Exception as e:
+        print(f"check_for_update failed: {e}")
+        return None, None
+
+
+def download_update(url):
+    """Hand the APK URL to Android's own DownloadManager - it downloads
+    directly (no browser tab involved) and posts its own system notification
+    that opens the package installer when tapped."""
+    try:
+        from jnius import autoclass
+        Context = autoclass("android.content.Context")
+        Uri = autoclass("android.net.Uri")
+        Environment = autoclass("android.os.Environment")
+        DownloadManager = autoclass("android.app.DownloadManager")
+        Request = autoclass("android.app.DownloadManager$Request")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        activity = PythonActivity.mActivity
+
+        request = Request(Uri.parse(url))
+        request.setTitle("TG Proxy Checker - обновление")
+        request.setDescription("Загрузка новой версии")
+        request.setNotificationVisibility(Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+        request.setMimeType("application/vnd.android.package-archive")
+        request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "tgproxycheck-update.apk")
+        request.setAllowedOverMeteredNetworks(True)
+
+        dm = activity.getSystemService(Context.DOWNLOAD_SERVICE)
+        dm.enqueue(request)
+        return True
+    except Exception as e:
+        print(f"download_update failed (running off-device?): {e}")
+        return False
 
 
 def send_telegram_notify(cfg, text):
@@ -198,7 +315,9 @@ async def _find_all_working(cfg, candidates):
 
     async def _bounded(c):
         async with sem:
+            _log(f"→ {c['server']}:{c['port']} — проверка MTProto-хендшейка...")
             ok = await _check_one(cfg["api_id"], cfg["api_hash"], c)
+            _log(f"{'✓' if ok else '✗'} {c['server']}:{c['port']} — {'работает' if ok else 'не отвечает'}")
         return c if ok else None
 
     results = await asyncio.gather(*[_bounded(c) for c in candidates])
@@ -218,21 +337,27 @@ def run_check_cycle():
     and keeps re-testing/using those instead of just failing - the app
     stays usable even without a live connection to the backend. Only raises
     (and records an error) if there's no cached list to fall back to."""
+    _log_reset()
     cfg = load_config()
     offline = False
     cache_age_min = None
     try:
+        _log(f"→ Запрос списка кандидатов у {cfg['server_host']}:8765...")
         candidates = fetch_candidates(cfg)
+        _log(f"✓ Получено кандидатов: {len(candidates)}")
     except Exception as e:
+        _log(f"✗ Сервер недоступен: {type(e).__name__}: {e}")
         cached = _load_cached_candidates()
         if not cached or not cached.get("candidates"):
             import traceback
             err_text = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
             _save_status([], error=err_text)
+            _log_finish()
             raise
         candidates = cached["candidates"]
         offline = True
         cache_age_min = int((time.time() - cached.get("cached_at", time.time())) / 60)
+        _log(f"↻ Использую сохранённый список ({len(candidates)} шт., от {cache_age_min} мин назад)")
 
     try:
         working_list = asyncio.run(_find_all_working(cfg, candidates))
@@ -240,6 +365,8 @@ def run_check_cycle():
         import traceback
         err_text = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
         _save_status([], error=err_text)
+        _log(f"✗ Ошибка проверки: {type(e).__name__}: {e}")
+        _log_finish()
         raise
 
     prev_list = _load_status().get("working_list") or []
@@ -247,12 +374,39 @@ def run_check_cycle():
     best = working_list[0] if working_list else None
 
     _save_status(working_list, offline=offline, cache_age_min=cache_age_min)
+    _log(f"Готово: рабочих {len(working_list)} из {len(candidates)}")
+    _log_finish()
 
     is_new = best and (not prev_best or (prev_best["server"], prev_best["port"]) != (best["server"], best["port"]))
     if is_new:
         _notify_new_proxy(cfg, best, len(working_list))
 
     return working_list
+
+
+_PROXY_LINK_RE = re.compile(
+    r"(?:https?://t\.me/proxy|tg://proxy)\?[^\s]*server=([^&\s]+)&(?:amp;)?port=(\d+)&(?:amp;)?secret=([A-Za-z0-9_\-=]+)"
+)
+_PROXY_TRIPLE_RE = re.compile(r"^\s*([\w.\-]+)[:\s]+(\d+)[:\s]+([A-Za-z0-9_\-=]+)\s*$")
+
+
+def parse_proxy_input(text):
+    """Same accepted formats as the bot's /check command: a t.me/tg:// proxy
+    link, or a plain server:port:secret triple."""
+    m = _PROXY_LINK_RE.search(text)
+    if m:
+        return m.group(1).rstrip("."), int(m.group(2)), m.group(3)
+    m = _PROXY_TRIPLE_RE.match(text)
+    if m:
+        return m.group(1), int(m.group(2)), m.group(3)
+    return None
+
+
+def check_single_proxy(cfg, server, port, secret):
+    """Manual one-off check triggered from the in-app dialog, mirroring the
+    bot's /check command."""
+    candidate = {"server": server, "port": port, "secret": secret}
+    return asyncio.run(_check_one(cfg["api_id"], cfg["api_hash"], candidate))
 
 
 def proxy_link(proxy):

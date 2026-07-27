@@ -1,4 +1,5 @@
 config.json
+version.json
 status.json
 .buildozer/
 bin/

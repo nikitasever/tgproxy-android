@@ -1,7 +1,7 @@
 import time
 import traceback
 
-from checker_core import run_check_cycle, load_config
+from checker_core import run_check_cycle, load_config, proxy_tg_uri
 
 CHECK_INTERVAL_SECONDS = 30 * 60
 
@@ -75,7 +75,7 @@ def main_loop():
                     (prev_best["server"], prev_best["port"]) != (best["server"], best["port"])
                 )
                 if is_new:
-                    link = f"https://t.me/proxy?server={best['server']}&port={best['port']}&secret={best['secret']}"
+                    link = proxy_tg_uri(best)
                     notify_android(
                         "Найден рабочий прокси",
                         f"{best['server']}:{best['port']} — тапни, чтобы подключить",

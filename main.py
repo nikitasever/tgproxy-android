@@ -5,19 +5,25 @@ import time
 
 from kivy.animation import Animation
 from kivy.clock import Clock
+from kivy.effects.dampedscroll import DampedScrollEffect
+from kivy.metrics import dp
 from kivy.uix.image import Image
 from kivy.uix.scrollview import ScrollView
 
 from kivymd.app import MDApp
 from kivymd.uix.boxlayout import MDBoxLayout
-from kivymd.uix.button import MDRaisedButton
+from kivymd.uix.button import MDRaisedButton, MDIconButton, MDFlatButton
 from kivymd.uix.card import MDCard
+from kivymd.uix.dialog import MDDialog
 from kivymd.uix.label import MDLabel
+from kivymd.uix.textfield import MDTextField
 
 from checker_core import (
     run_check_cycle, STATUS_FILE, get_install_code, is_first_run,
-    open_url_on_device, proxy_link, BOT_USERNAME,
+    open_url_on_device, proxy_tg_uri, bot_start_uri,
     request_runtime_permissions, request_ignore_battery_optimizations,
+    load_live_log, load_config, parse_proxy_input, check_single_proxy,
+    get_local_build_number, check_for_update, download_update,
 )
 
 OK_COLOR = (0.20, 0.75, 0.45, 1)
@@ -27,6 +33,8 @@ SUBTEXT = (0.58, 0.62, 0.70, 1)
 ROW_BEST_BG = (0.11, 0.20, 0.16, 1)
 ROW_BG = (0.16, 0.18, 0.23, 1)
 BADGE_BG = (0.26, 0.29, 0.36, 1)
+TERMINAL_BG = (0.04, 0.05, 0.06, 1)
+TERMINAL_TEXT = (0.35, 0.90, 0.45, 1)
 
 
 class ProxyRow(MDCard):
@@ -67,7 +75,7 @@ class ProxyRow(MDCard):
             md_bg_color=OK_COLOR if rank == 1 else MDApp.get_running_app().theme_cls.primary_color,
             size_hint=(None, None), size=("96dp", "40dp"),
         )
-        open_btn.bind(on_release=lambda *_: open_url_on_device(proxy_link(proxy)))
+        open_btn.bind(on_release=lambda *_: open_url_on_device(proxy_tg_uri(proxy)))
         self.add_widget(open_btn)
 
         anim = Animation(opacity=1, duration=0.35, t="out_quad")
@@ -89,7 +97,7 @@ class TgProxyApp(MDApp):
         self.theme_cls.theme_style = "Dark"
         self.theme_cls.primary_palette = "Blue"
 
-        root = MDBoxLayout(orientation="vertical", padding=[24, 56, 24, 24], spacing=14)
+        root = MDBoxLayout(orientation="vertical", padding=[24, 56, 24, 24], spacing=12)
 
         header = MDBoxLayout(orientation="horizontal", size_hint=(1, None), height="48dp", spacing=14)
         icon_path = os.path.join(os.path.dirname(__file__), "icon.png")
@@ -106,7 +114,23 @@ class TgProxyApp(MDApp):
             halign="left", valign="top", size_hint=(1, None), height="16dp",
         ))
         header.add_widget(title_box)
+        header.add_widget(MDIconButton(icon="magnify", on_release=self.open_manual_check_dialog))
         root.add_widget(header)
+
+        self.update_card = MDCard(
+            orientation="horizontal", padding=[14, 8], spacing=10,
+            size_hint=(1, None), height=0, opacity=0,
+            radius=[12], md_bg_color=(0.18, 0.14, 0.05, 1),
+        )
+        self.update_label = MDLabel(
+            text="", theme_text_color="Custom", text_color=WARN_COLOR, font_style="Caption",
+            halign="left", valign="middle",
+        )
+        self.update_card.add_widget(self.update_label)
+        self.update_btn = MDFlatButton(text="Скачать", theme_text_color="Custom", text_color=WARN_COLOR)
+        self.update_btn.bind(on_release=self._download_update)
+        self.update_card.add_widget(self.update_btn)
+        root.add_widget(self.update_card)
 
         self.summary_label = MDLabel(
             text="Ещё не проверялось", theme_text_color="Custom", text_color=SUBTEXT,
@@ -117,9 +141,32 @@ class TgProxyApp(MDApp):
 
         self.list_box = MDBoxLayout(orientation="vertical", spacing=10, size_hint_y=None)
         self.list_box.bind(minimum_height=self.list_box.setter("height"))
-        scroll = ScrollView(size_hint=(1, 1))
-        scroll.add_widget(self.list_box)
-        root.add_widget(scroll)
+        self.scroll = ScrollView(
+            size_hint=(1, 1), effect_cls=DampedScrollEffect,
+            scroll_type=["bars", "content"], bar_width="4dp", smooth_scroll_end=10,
+        )
+        self.scroll.add_widget(self.list_box)
+        root.add_widget(self.scroll)
+
+        # "running command line" panel - visible only while a check is in
+        # progress, showing exactly what's being contacted right now
+        self.terminal_card = MDCard(
+            orientation="vertical", padding=[12, 8], size_hint=(1, None),
+            height=0, opacity=0, radius=[12], md_bg_color=TERMINAL_BG,
+        )
+        term_scroll = ScrollView(size_hint=(1, 1), effect_cls=DampedScrollEffect)
+        self.terminal_label = MDLabel(
+            text="", theme_text_color="Custom", text_color=TERMINAL_TEXT,
+            font_style="Caption", halign="left", valign="top",
+            size_hint_y=None,
+        )
+        self.terminal_label.bind(texture_size=lambda *_: setattr(
+            self.terminal_label, "height", self.terminal_label.texture_size[1]
+        ))
+        term_scroll.add_widget(self.terminal_label)
+        self.terminal_card.add_widget(term_scroll)
+        self._terminal_scroll = term_scroll
+        root.add_widget(self.terminal_card)
 
         self.check_btn = MDRaisedButton(
             text="Проверить сейчас", size_hint=(1, None), height="58dp",
@@ -136,17 +183,19 @@ class TgProxyApp(MDApp):
         root.add_widget(footer)
 
         Clock.schedule_interval(lambda dt: self.refresh_status(), 5)
+        Clock.schedule_interval(lambda dt: self._refresh_terminal(), 0.4)
         self.refresh_status()
         request_runtime_permissions()
         self.start_background_service()
         Clock.schedule_once(lambda dt: request_ignore_battery_optimizations(), 1.0)
         Clock.schedule_once(lambda dt: self._maybe_link_telegram(), 2.0)
+        Clock.schedule_once(lambda dt: self._check_update_async(), 2.5)
         return root
 
     def _maybe_link_telegram(self):
         if is_first_run():
             code = get_install_code()
-            open_url_on_device(f"https://t.me/{BOT_USERNAME}?start={code}")
+            open_url_on_device(bot_start_uri(code))
         else:
             get_install_code()
 
@@ -158,6 +207,92 @@ class TgProxyApp(MDApp):
             service.start(mActivity, "")
         except Exception as e:
             print(f"start_background_service unavailable (running off-device?): {e}")
+
+    # -- manual single-proxy check dialog ----------------------------------
+
+    def open_manual_check_dialog(self, *_):
+        self._check_field = MDTextField(
+            hint_text="Ссылка t.me/proxy или server:port:secret",
+            mode="rectangle",
+        )
+        self._check_result_label = MDLabel(
+            text="", theme_text_color="Custom", text_color=SUBTEXT,
+            font_style="Caption", size_hint_y=None, height="20dp",
+        )
+        content = MDBoxLayout(
+            orientation="vertical", spacing=10, size_hint_y=None, height="100dp",
+        )
+        content.add_widget(self._check_field)
+        content.add_widget(self._check_result_label)
+        self._check_dialog = MDDialog(
+            title="Проверить прокси вручную",
+            type="custom",
+            content_cls=content,
+            buttons=[
+                MDFlatButton(text="Закрыть", on_release=lambda *_: self._check_dialog.dismiss()),
+                MDRaisedButton(text="Проверить", on_release=self._run_manual_single_check),
+            ],
+        )
+        self._check_dialog.open()
+
+    def _run_manual_single_check(self, *_):
+        parsed = parse_proxy_input(self._check_field.text.strip())
+        if not parsed:
+            self._check_result_label.text_color = ERR_COLOR
+            self._check_result_label.text = "Не разобрал формат"
+            return
+        self._check_result_label.text_color = SUBTEXT
+        self._check_result_label.text = "Проверяю..."
+        threading.Thread(target=self._manual_single_check_thread, args=(parsed,), daemon=True).start()
+
+    def _manual_single_check_thread(self, parsed):
+        server, port, secret = parsed
+        try:
+            cfg = load_config()
+            ok = check_single_proxy(cfg, server, port, secret)
+        except Exception as e:
+            ok = None
+            err = str(e)
+        else:
+            err = None
+        Clock.schedule_once(lambda dt: self._on_manual_single_check_done(server, port, ok, err), 0)
+
+    def _on_manual_single_check_done(self, server, port, ok, err):
+        if ok is None:
+            self._check_result_label.text_color = ERR_COLOR
+            self._check_result_label.text = f"Ошибка: {err}"
+        elif ok:
+            self._check_result_label.text_color = OK_COLOR
+            self._check_result_label.text = f"✅ {server}:{port} работает"
+        else:
+            self._check_result_label.text_color = ERR_COLOR
+            self._check_result_label.text = f"❌ {server}:{port} не отвечает"
+
+    # -- in-app update check -------------------------------------------------
+
+    def _check_update_async(self):
+        threading.Thread(target=self._check_update_thread, daemon=True).start()
+
+    def _check_update_thread(self):
+        remote_build, apk_url = check_for_update()
+        if remote_build is None:
+            return
+        local_build = get_local_build_number()
+        if remote_build > local_build:
+            Clock.schedule_once(lambda dt: self._show_update_banner(remote_build, apk_url), 0)
+
+    def _show_update_banner(self, remote_build, apk_url):
+        self._update_apk_url = apk_url
+        self.update_label.text = f"Доступно обновление (сборка #{remote_build})"
+        Animation(height=dp(44), opacity=1, duration=0.3, t="out_quad").start(self.update_card)
+
+    def _download_update(self, *_):
+        self.update_btn.text = "Загрузка..."
+        threading.Thread(
+            target=lambda: download_update(self._update_apk_url), daemon=True,
+        ).start()
+
+    # -- proxy check cycle ---------------------------------------------------
 
     def manual_check(self, instance):
         self.check_btn.disabled = True
@@ -188,6 +323,28 @@ class TgProxyApp(MDApp):
         self.check_btn.text = "Проверить сейчас"
         self.refresh_status()
 
+    def _refresh_terminal(self):
+        log = load_live_log()
+        checking = log.get("checking")
+        lines = log.get("lines") or []
+
+        if checking:
+            self.terminal_label.text = "\n".join(lines)
+            if self.terminal_card.height < 10:
+                Animation(height=dp(150), opacity=1, duration=0.25, t="out_quad").start(self.terminal_card)
+            Clock.schedule_once(lambda dt: setattr(self._terminal_scroll, "scroll_y", 0), 0)
+        elif self.terminal_card.height > 10 and lines:
+            # leave the final lines up for a moment before collapsing
+            self.terminal_label.text = "\n".join(lines)
+            if not getattr(self, "_terminal_collapse_scheduled", False):
+                self._terminal_collapse_scheduled = True
+
+                def _collapse(dt):
+                    Animation(height=0, opacity=0, duration=0.3, t="in_quad").start(self.terminal_card)
+                    self._terminal_collapse_scheduled = False
+
+                Clock.schedule_once(_collapse, 1.6)
+
     def _set_list(self, proxies):
         fingerprint = tuple((p["server"], p["port"], p.get("latency_ms")) for p in proxies)
         if fingerprint == getattr(self, "_last_fingerprint", None):
@@ -196,6 +353,7 @@ class TgProxyApp(MDApp):
         self.list_box.clear_widgets()
         for i, p in enumerate(proxies, start=1):
             self.list_box.add_widget(ProxyRow(i, p, stagger=0.05 * (i - 1)))
+        Animation(scroll_y=1, duration=0.4, t="out_quad").start(self.scroll)
 
     def refresh_status(self):
         if not os.path.exists(STATUS_FILE):
