@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -64,3 +67,15 @@ jobs:
         with:
           name: tgproxycheck-apk
           path: bin/*.apk
+
+      - name: Rename APK for release
+        run: cp bin/*.apk tgproxycheck-latest.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: TG Proxy Checker (latest build)
+          body: Automatically built from the latest commit on main. Direct download - install the APK on your Android phone (allow "install from unknown sources" if prompted).
+          files: tgproxycheck-latest.apk
+          make_latest: true

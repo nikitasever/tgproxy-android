@@ -6,6 +6,8 @@ package.domain = org.nikitasever
 source.dir = .
 source.include_exts = py,json,png,jpg,kv,atlas
 
+icon.filename = %(source.dir)s/icon.png
+
 version = 0.1
 requirements = python3,kivy,telethon,pyaes,rsa,pyasn1,pysocks,plyer
 

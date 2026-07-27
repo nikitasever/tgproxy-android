@@ -4,6 +4,7 @@ import os
 import ssl
 import time
 import urllib.request
+import uuid
 
 from telethon import TelegramClient
 from telethon.network.connection.tcpmtproxy import ConnectionTcpMTProxyRandomizedIntermediate
@@ -11,8 +12,11 @@ from telethon.network.connection.tcpmtproxy import ConnectionTcpMTProxyRandomize
 APP_DIR = os.path.dirname(__file__)
 CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 STATUS_FILE = os.path.join(APP_DIR, "status.json")
+INSTALL_CODE_FILE = os.path.join(APP_DIR, "install_code.txt")
 
 RESULTS_URL_TEMPLATE = "https://{host}:8765/results.json?token={token}"
+NOTIFY_URL_TEMPLATE = "https://{host}:8765/notify?token={token}"
+BOT_USERNAME = "proxy_parserbot"
 
 # the results endpoint uses a self-signed cert (private token-protected
 # endpoint, not a public site) - skip verification instead of bundling a CA
@@ -21,6 +25,57 @@ _INSECURE_SSL_CONTEXT.check_hostname = False
 _INSECURE_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
 TOP_N_TO_TEST = 15
 PER_CHECK_TIMEOUT = 8
+
+
+def get_install_code():
+    """Stable per-install identifier, generated once and reused - lets the
+    server link this specific device to whichever Telegram chat opens the
+    matching /start deep link."""
+    if os.path.exists(INSTALL_CODE_FILE):
+        with open(INSTALL_CODE_FILE, "r", encoding="utf-8") as f:
+            code = f.read().strip()
+        if code:
+            return code
+    code = uuid.uuid4().hex
+    with open(INSTALL_CODE_FILE, "w", encoding="utf-8") as f:
+        f.write(code)
+    return code
+
+
+def is_first_run():
+    return not os.path.exists(INSTALL_CODE_FILE)
+
+
+def open_url_on_device(url):
+    """Open a URL/deep-link via an Android ACTION_VIEW intent. No-op (with a
+    printed message) when not running on-device, e.g. local testing."""
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        Intent = autoclass("android.content.Intent")
+        Uri = autoclass("android.net.Uri")
+        activity = PythonActivity.mActivity
+        intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        activity.startActivity(intent)
+    except Exception as e:
+        print(f"open_url_on_device unavailable (running off-device?): {e}")
+
+
+def send_telegram_notify(cfg, text):
+    """Ask the server to DM `text` to whichever Telegram chat this install is
+    linked to. Silently skipped if not linked yet or the request fails -
+    the Android notification is the guaranteed delivery path."""
+    try:
+        url = NOTIFY_URL_TEMPLATE.format(host=cfg["server_host"], token=cfg["http_token"])
+        body = json.dumps({"install_code": get_install_code(), "text": text}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=15, context=_INSECURE_SSL_CONTEXT)
+    except Exception as e:
+        print(f"send_telegram_notify failed: {e}")
 
 
 def load_config():
@@ -103,12 +158,12 @@ def run_check_cycle():
 
     is_new = working and (not prev or (prev["server"], prev["port"]) != (working["server"], working["port"]))
     if is_new:
-        _notify_new_proxy(working)
+        _notify_new_proxy(cfg, working)
 
     return working
 
 
-def _notify_new_proxy(proxy):
+def _notify_new_proxy(cfg, proxy):
     link = f"https://t.me/proxy?server={proxy['server']}&port={proxy['port']}&secret={proxy['secret']}"
     try:
         from plyer import notification
@@ -118,4 +173,10 @@ def _notify_new_proxy(proxy):
         )
     except Exception as e:
         print(f"notification failed (running off-device?): {e}")
+
+    send_telegram_notify(
+        cfg,
+        f"✅ Найден рабочий прокси для твоего устройства:\n"
+        f"{proxy['server']}:{proxy['port']} — пинг {proxy.get('latency_ms', '?')} мс\n\n{link}",
+    )
     print(f"[tgproxy] new working proxy: {link}")
