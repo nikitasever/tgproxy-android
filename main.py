@@ -3,6 +3,7 @@ import os
 import threading
 import time
 
+from kivy.animation import Animation
 from kivy.app import App
 from kivy.clock import Clock
 from kivy.graphics import Color, RoundedRectangle
@@ -25,6 +26,7 @@ ROW_BEST = (0.11, 0.20, 0.16, 1)
 ACCENT = (0.20, 0.55, 0.95, 1)
 OK_COLOR = (0.20, 0.75, 0.45, 1)
 ERR_COLOR = (0.90, 0.35, 0.35, 1)
+WARN_COLOR = (0.95, 0.68, 0.20, 1)
 TEXT = (0.93, 0.94, 0.97, 1)
 SUBTEXT = (0.58, 0.62, 0.70, 1)
 
@@ -54,11 +56,12 @@ class FlatButton(Button):
 
 
 class ProxyRow(RoundedBox):
-    def __init__(self, rank, proxy, **kwargs):
+    def __init__(self, rank, proxy, stagger=0.0, **kwargs):
         super().__init__(
             bg=ROW_BEST if rank == 1 else ROW, radius=14,
             orientation="horizontal", padding=[16, 10], spacing=12,
             size_hint=(1, None), height=68,
+            opacity=0,
             **kwargs,
         )
         badge_bg = OK_COLOR if rank == 1 else (0.24, 0.27, 0.34, 1)
@@ -86,6 +89,24 @@ class ProxyRow(RoundedBox):
         open_btn.bind(on_press=lambda *_: open_url_on_device(proxy_link(proxy)))
         self.add_widget(open_btn)
 
+        # smooth staggered fade-in cascade, best card first (opacity-only:
+        # BoxLayout repositions children every layout pass, so animating
+        # pos/y here would just fight the parent's own layout)
+        anim = Animation(opacity=1, duration=0.35, t="out_quad")
+        if rank == 1:
+            anim.bind(on_complete=lambda *_: self._start_glow_pulse())
+        Clock.schedule_once(lambda dt: anim.start(self), stagger)
+
+    def _start_glow_pulse(self):
+        # gentle "breathing" highlight on the top result, built-in opacity
+        # property so no extra canvas bookkeeping is needed
+        pulse = (
+            Animation(opacity=0.82, duration=1.1, t="in_out_sine")
+            + Animation(opacity=1.0, duration=1.1, t="in_out_sine")
+        )
+        pulse.repeat = True
+        pulse.start(self)
+
 
 class TgProxyApp(App):
     def build(self):
@@ -112,11 +133,11 @@ class TgProxyApp(App):
         header.add_widget(title_box)
         root.add_widget(header)
 
-        status_row = BoxLayout(orientation="horizontal", size_hint=(1, None), height=20)
+        status_row = BoxLayout(orientation="horizontal", size_hint=(1, None), height=40)
         self.summary_label = Label(
             text="Ещё не проверялось", font_size="13sp", color=SUBTEXT,
-            halign="left", valign="middle", size_hint=(1, 1),
-            text_size=(Window.width - 48, 20),
+            halign="left", valign="top", size_hint=(1, 1),
+            text_size=(Window.width - 48, 40),
         )
         status_row.add_widget(self.summary_label)
         root.add_widget(status_row)
@@ -166,6 +187,13 @@ class TgProxyApp(App):
         self.check_btn.text = "Проверяю..."
         self.summary_label.color = SUBTEXT
         self.summary_label.text = "Опрашиваю сервер и проверяю кандидатов..."
+        pulse = (
+            Animation(opacity=0.55, duration=0.6, t="in_out_sine")
+            + Animation(opacity=1.0, duration=0.6, t="in_out_sine")
+        )
+        pulse.repeat = True
+        pulse.start(self.check_btn)
+        self._check_pulse = pulse
         threading.Thread(target=self._run_once, daemon=True).start()
 
     def _run_once(self):
@@ -176,14 +204,21 @@ class TgProxyApp(App):
         Clock.schedule_once(lambda dt: self._on_check_done(), 0)
 
     def _on_check_done(self):
+        if getattr(self, "_check_pulse", None):
+            self._check_pulse.cancel(self.check_btn)
+        self.check_btn.opacity = 1
         self.check_btn.disabled = False
         self.check_btn.text = "Проверить сейчас"
         self.refresh_status()
 
     def _set_list(self, proxies):
+        fingerprint = tuple((p["server"], p["port"], p.get("latency_ms")) for p in proxies)
+        if fingerprint == getattr(self, "_last_fingerprint", None):
+            return  # unchanged since last render - skip re-animating the list
+        self._last_fingerprint = fingerprint
         self.list_box.clear_widgets()
         for i, p in enumerate(proxies, start=1):
-            self.list_box.add_widget(ProxyRow(i, p))
+            self.list_box.add_widget(ProxyRow(i, p, stagger=0.05 * (i - 1)))
 
     def refresh_status(self):
         if not os.path.exists(STATUS_FILE):
@@ -207,13 +242,19 @@ class TgProxyApp(App):
 
         age_min = int((time.time() - data.get("checked_at", 0)) / 60)
         working = data.get("working_list") or []
+        offline = data.get("offline")
 
         if working:
-            self.summary_label.color = OK_COLOR
+            self.summary_label.color = WARN_COLOR if offline else OK_COLOR
             self.summary_label.text = f"✅ Найдено {len(working)} рабочих — проверено {age_min} мин назад"
         else:
             self.summary_label.color = ERR_COLOR
             self.summary_label.text = f"❌ Рабочих не найдено — проверено {age_min} мин назад"
+
+        if offline:
+            cache_age = data.get("cache_age_min")
+            age_note = f" ({cache_age} мин назад)" if cache_age is not None else ""
+            self.summary_label.text += f"\n⚠️ Сервер недоступен — используются сохранённые кандидаты{age_note}"
 
         self._set_list(working)
 

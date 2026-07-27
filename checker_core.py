@@ -13,6 +13,7 @@ APP_DIR = os.path.dirname(__file__)
 CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 STATUS_FILE = os.path.join(APP_DIR, "status.json")
 INSTALL_CODE_FILE = os.path.join(APP_DIR, "install_code.txt")
+CANDIDATES_CACHE_FILE = os.path.join(APP_DIR, "cached_candidates.json")
 
 RESULTS_URL_TEMPLATE = "https://{host}:8765/results.json?token={token}"
 NOTIFY_URL_TEMPLATE = "https://{host}:8765/notify?token={token}"
@@ -130,8 +131,14 @@ def _load_status():
         return {}
 
 
-def _save_status(working_list, error=None):
-    data = {"checked_at": time.time(), "working_list": working_list, "error": error}
+def _save_status(working_list, error=None, offline=False, cache_age_min=None):
+    data = {
+        "checked_at": time.time(),
+        "working_list": working_list,
+        "error": error,
+        "offline": offline,
+        "cache_age_min": cache_age_min,
+    }
     with open(STATUS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f)
     return data
@@ -142,7 +149,23 @@ def fetch_candidates(cfg):
     req = urllib.request.Request(url, headers={"User-Agent": "tgproxy-android"})
     with urllib.request.urlopen(req, timeout=15, context=_INSECURE_SSL_CONTEXT) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    return data["proxies"][:TOP_N_TO_TEST]
+    candidates = data["proxies"][:TOP_N_TO_TEST]
+    with open(CANDIDATES_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"candidates": candidates, "cached_at": time.time()}, f)
+    return candidates
+
+
+def _load_cached_candidates():
+    """Last successfully fetched candidate list, kept on-device so the app
+    can keep checking/using a proxy even if the parsing server on the VPS
+    is temporarily unreachable."""
+    if not os.path.exists(CANDIDATES_CACHE_FILE):
+        return None
+    try:
+        with open(CANDIDATES_CACHE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 async def _check_one(api_id, api_hash, candidate):
@@ -188,11 +211,30 @@ def run_check_cycle():
     """Fetch candidates, test them over whatever network is currently active
     on this device, and persist every working one (sorted by ping) to
     status.json. Returns the list of working candidates (best first,
-    possibly empty). On failure, the error is saved to status.json (visible
-    in the UI) instead of vanishing silently."""
+    possibly empty).
+
+    If the parsing server itself is unreachable (down, blocked, VPS issue),
+    falls back to the last candidate list this device successfully fetched
+    and keeps re-testing/using those instead of just failing - the app
+    stays usable even without a live connection to the backend. Only raises
+    (and records an error) if there's no cached list to fall back to."""
+    cfg = load_config()
+    offline = False
+    cache_age_min = None
     try:
-        cfg = load_config()
         candidates = fetch_candidates(cfg)
+    except Exception as e:
+        cached = _load_cached_candidates()
+        if not cached or not cached.get("candidates"):
+            import traceback
+            err_text = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            _save_status([], error=err_text)
+            raise
+        candidates = cached["candidates"]
+        offline = True
+        cache_age_min = int((time.time() - cached.get("cached_at", time.time())) / 60)
+
+    try:
         working_list = asyncio.run(_find_all_working(cfg, candidates))
     except Exception as e:
         import traceback
@@ -204,7 +246,7 @@ def run_check_cycle():
     prev_best = prev_list[0] if prev_list else None
     best = working_list[0] if working_list else None
 
-    _save_status(working_list)
+    _save_status(working_list, offline=offline, cache_age_min=cache_age_min)
 
     is_new = best and (not prev_best or (prev_best["server"], prev_best["port"]) != (best["server"], best["port"]))
     if is_new:
