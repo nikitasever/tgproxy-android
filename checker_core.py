@@ -167,8 +167,11 @@ def get_local_build_number():
 def check_for_update():
     """Look up the latest published GitHub Release and compare its build
     number (baked into the release name at CI time) against this install's
-    own version.json. Returns (remote_build_number, apk_download_url) or
-    (None, None) on any failure - update checks are best-effort."""
+    own version.json. Returns (remote_build_number, apk_download_url, error)
+    - error is None on success, otherwise a short string explaining why the
+    check failed (surfaced in the UI instead of silently vanishing, since
+    api.github.com being unreachable without a VPN is a real possibility
+    on this network)."""
     try:
         req = urllib.request.Request(UPDATE_API_URL, headers={"User-Agent": "tgproxycheck-app"})
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -180,11 +183,12 @@ def check_for_update():
             None,
         )
         if remote_build is None or apk_url is None:
-            return None, None
-        return remote_build, apk_url
+            return None, None, "не распознан формат релиза"
+        return remote_build, apk_url, None
     except Exception as e:
-        print(f"check_for_update failed: {e}")
-        return None, None
+        err = f"{type(e).__name__}: {e}"
+        print(f"check_for_update failed: {err}")
+        return None, None, err
 
 
 def download_update(url):

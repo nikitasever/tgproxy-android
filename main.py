@@ -279,8 +279,9 @@ class TgProxyApp(MDApp):
         threading.Thread(target=self._check_update_thread, daemon=True).start()
 
     def _check_update_thread(self):
-        remote_build, apk_url = check_for_update()
-        if remote_build is None:
+        remote_build, apk_url, err = check_for_update()
+        if err:
+            Clock.schedule_once(lambda dt: self._show_update_check_error(err), 0)
             return
         local_build = get_local_build_number()
         if remote_build > local_build:
@@ -289,9 +290,24 @@ class TgProxyApp(MDApp):
     def _show_update_banner(self, remote_build, apk_url):
         self._update_apk_url = apk_url
         self.update_label.text = f"Доступно обновление (сборка #{remote_build})"
+        self.update_btn.text = "Скачать"
+        self.update_btn.disabled = False
         Animation(height=dp(44), opacity=1, duration=0.3, t="out_quad").start(self.update_card)
 
+    def _show_update_check_error(self, err):
+        # surfaced instead of silently failing - api.github.com being
+        # unreachable without a VPN on this network is a real possibility,
+        # and this makes that visible without needing adb
+        self._update_apk_url = None
+        self.update_label.text = f"Не удалось проверить обновления: {err}"
+        self.update_btn.text = "Ок"
+        self.update_btn.disabled = True
+        Animation(height=dp(44), opacity=1, duration=0.3, t="out_quad").start(self.update_card)
+        Clock.schedule_once(lambda dt: Animation(height=0, opacity=0, duration=0.3).start(self.update_card), 8.0)
+
     def _download_update(self, *_):
+        if not self._update_apk_url:
+            return
         self.update_btn.text = "Загрузка..."
         threading.Thread(
             target=lambda: download_update(self._update_apk_url), daemon=True,
@@ -327,6 +343,9 @@ class TgProxyApp(MDApp):
         self.check_btn.disabled = False
         self.check_btn.text = "Проверить сейчас"
         self.refresh_status()
+        # the device clearly has some network path working right now -
+        # good moment to retry the update check if it failed on launch
+        self._check_update_async()
 
     def _refresh_terminal(self):
         log = load_live_log()
