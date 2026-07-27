@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import ssl
 import time
 import urllib.request
 
@@ -11,7 +12,13 @@ APP_DIR = os.path.dirname(__file__)
 CONFIG_FILE = os.path.join(APP_DIR, "config.json")
 STATUS_FILE = os.path.join(APP_DIR, "status.json")
 
-RESULTS_URL_TEMPLATE = "http://{host}:8765/results.json?token={token}"
+RESULTS_URL_TEMPLATE = "https://{host}:8765/results.json?token={token}"
+
+# the results endpoint uses a self-signed cert (private token-protected
+# endpoint, not a public site) - skip verification instead of bundling a CA
+_INSECURE_SSL_CONTEXT = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+_INSECURE_SSL_CONTEXT.check_hostname = False
+_INSECURE_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
 TOP_N_TO_TEST = 15
 PER_CHECK_TIMEOUT = 8
 
@@ -31,8 +38,8 @@ def _load_status():
         return {}
 
 
-def _save_status(working):
-    data = {"checked_at": time.time(), "working": working}
+def _save_status(working, error=None):
+    data = {"checked_at": time.time(), "working": working, "error": error}
     with open(STATUS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f)
     return data
@@ -41,7 +48,7 @@ def _save_status(working):
 def fetch_candidates(cfg):
     url = RESULTS_URL_TEMPLATE.format(host=cfg["server_host"], token=cfg["http_token"])
     req = urllib.request.Request(url, headers={"User-Agent": "tgproxy-android"})
-    with urllib.request.urlopen(req, timeout=15) as resp:
+    with urllib.request.urlopen(req, timeout=15, context=_INSECURE_SSL_CONTEXT) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     return data["proxies"][:TOP_N_TO_TEST]
 
@@ -79,10 +86,17 @@ async def _find_working(cfg, candidates):
 def run_check_cycle():
     """Fetch candidates, test them over whatever network is currently active
     on this device, and persist the first working one to status.json.
-    Returns the working candidate dict, or None."""
-    cfg = load_config()
-    candidates = fetch_candidates(cfg)
-    working = asyncio.run(_find_working(cfg, candidates))
+    Returns the working candidate dict, or None. On failure, the error is
+    saved to status.json (visible in the UI) instead of vanishing silently."""
+    try:
+        cfg = load_config()
+        candidates = fetch_candidates(cfg)
+        working = asyncio.run(_find_working(cfg, candidates))
+    except Exception as e:
+        import traceback
+        err_text = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        _save_status(None, error=err_text)
+        raise
 
     prev = _load_status().get("working")
     _save_status(working)
