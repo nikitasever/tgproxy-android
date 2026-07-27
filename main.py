@@ -114,6 +114,7 @@ class TgProxyApp(MDApp):
             halign="left", valign="top", size_hint=(1, None), height="16dp",
         ))
         header.add_widget(title_box)
+        header.add_widget(MDIconButton(icon="send", on_release=self._relink_telegram))
         header.add_widget(MDIconButton(icon="magnify", on_release=self.open_manual_check_dialog))
         root.add_widget(header)
 
@@ -193,11 +194,18 @@ class TgProxyApp(MDApp):
         return root
 
     def _maybe_link_telegram(self):
+        # auto-open only ever fires on the very first launch - if the user
+        # never actually tapped Start in Telegram back then (closed it,
+        # switched networks, etc.) there was previously no way to retry;
+        # the header button below covers that
         if is_first_run():
             code = get_install_code()
             open_url_on_device(bot_start_uri(code))
         else:
             get_install_code()
+
+    def _relink_telegram(self, *_):
+        open_url_on_device(bot_start_uri(get_install_code()))
 
     def start_background_service(self):
         try:
@@ -249,24 +257,21 @@ class TgProxyApp(MDApp):
         server, port, secret = parsed
         try:
             cfg = load_config()
-            ok = check_single_proxy(cfg, server, port, secret)
+            ok, reason = check_single_proxy(cfg, server, port, secret)
         except Exception as e:
-            ok = None
-            err = str(e)
-        else:
-            err = None
-        Clock.schedule_once(lambda dt: self._on_manual_single_check_done(server, port, ok, err), 0)
+            ok, reason = None, str(e)
+        Clock.schedule_once(lambda dt: self._on_manual_single_check_done(server, port, ok, reason), 0)
 
-    def _on_manual_single_check_done(self, server, port, ok, err):
+    def _on_manual_single_check_done(self, server, port, ok, reason):
         if ok is None:
             self._check_result_label.text_color = ERR_COLOR
-            self._check_result_label.text = f"Ошибка: {err}"
+            self._check_result_label.text = f"Ошибка: {reason}"
         elif ok:
             self._check_result_label.text_color = OK_COLOR
             self._check_result_label.text = f"✅ {server}:{port} работает"
         else:
             self._check_result_label.text_color = ERR_COLOR
-            self._check_result_label.text = f"❌ {server}:{port} не отвечает"
+            self._check_result_label.text = f"❌ {server}:{port} не отвечает ({reason})"
 
     # -- in-app update check -------------------------------------------------
 

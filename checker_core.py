@@ -31,7 +31,7 @@ _INSECURE_SSL_CONTEXT = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 _INSECURE_SSL_CONTEXT.check_hostname = False
 _INSECURE_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
 TOP_N_TO_TEST = 15
-PER_CHECK_TIMEOUT = 8
+PER_CHECK_TIMEOUT = 12
 
 
 def get_install_code():
@@ -286,6 +286,10 @@ def _load_cached_candidates():
 
 
 async def _check_one(api_id, api_hash, candidate):
+    """Returns (ok, reason) - reason is None on success, otherwise a short
+    description of why it failed (timeout vs. connection refused vs. some
+    other exception), so the live log can show the actual cause instead of
+    just a flat 'not responding'."""
     server, port, secret = candidate["server"], candidate["port"], candidate["secret"]
     client = TelegramClient(
         None, api_id, api_hash,
@@ -297,27 +301,33 @@ async def _check_one(api_id, api_hash, candidate):
     try:
         await asyncio.wait_for(client.connect(), timeout=PER_CHECK_TIMEOUT)
         ok = client.is_connected()
-    except Exception:
-        ok = False
+        reason = None if ok else "не подключился"
+    except asyncio.TimeoutError:
+        ok, reason = False, f"таймаут {PER_CHECK_TIMEOUT}с"
+    except Exception as e:
+        ok, reason = False, f"{type(e).__name__}"
     finally:
         try:
             await client.disconnect()
         except Exception:
             pass
-    return ok
+    return ok, reason
 
 
 async def _find_all_working(cfg, candidates):
     """Test every candidate concurrently (bounded) instead of stopping at the
     first hit - lets the UI show a real list of working proxies to pick
-    from, not just one."""
-    sem = asyncio.Semaphore(5)
+    from, not just one. Concurrency is kept modest (3) since these checks
+    run over the phone's own (often mobile/weaker) network, not the beefy
+    VPS connection the server-side scan uses."""
+    sem = asyncio.Semaphore(3)
 
     async def _bounded(c):
         async with sem:
             _log(f"→ {c['server']}:{c['port']} — проверка MTProto-хендшейка...")
-            ok = await _check_one(cfg["api_id"], cfg["api_hash"], c)
-            _log(f"{'✓' if ok else '✗'} {c['server']}:{c['port']} — {'работает' if ok else 'не отвечает'}")
+            ok, reason = await _check_one(cfg["api_id"], cfg["api_hash"], c)
+            suffix = f" ({reason})" if reason else ""
+            _log(f"{'✓' if ok else '✗'} {c['server']}:{c['port']} — {'работает' if ok else 'не отвечает'}{suffix}")
         return c if ok else None
 
     results = await asyncio.gather(*[_bounded(c) for c in candidates])
@@ -404,7 +414,7 @@ def parse_proxy_input(text):
 
 def check_single_proxy(cfg, server, port, secret):
     """Manual one-off check triggered from the in-app dialog, mirroring the
-    bot's /check command."""
+    bot's /check command. Returns (ok, reason)."""
     candidate = {"server": server, "port": port, "secret": secret}
     return asyncio.run(_check_one(cfg["api_id"], cfg["api_hash"], candidate))
 
