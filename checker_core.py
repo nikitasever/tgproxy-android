@@ -46,6 +46,43 @@ def is_first_run():
     return not os.path.exists(INSTALL_CODE_FILE)
 
 
+def request_runtime_permissions():
+    """Ask for the dangerous/runtime permissions the app actually needs
+    (notifications on Android 13+ won't show without an explicit grant -
+    the manifest entry alone isn't enough)."""
+    try:
+        from android.permissions import request_permissions, Permission
+        perms = [Permission.INTERNET, Permission.FOREGROUND_SERVICE, Permission.WAKE_LOCK]
+        if hasattr(Permission, "POST_NOTIFICATIONS"):
+            perms.append(Permission.POST_NOTIFICATIONS)
+        request_permissions(perms)
+    except Exception as e:
+        print(f"request_runtime_permissions unavailable (running off-device?): {e}")
+
+
+def request_ignore_battery_optimizations():
+    """Prompt the user to exempt the app from battery optimization, so
+    Android doesn't kill the background 30-minute check service to save
+    power. Shows a normal system permission dialog; no-ops if already
+    exempted or not running on-device."""
+    try:
+        from jnius import autoclass
+        Context = autoclass("android.content.Context")
+        Intent = autoclass("android.content.Intent")
+        Uri = autoclass("android.net.Uri")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        activity = PythonActivity.mActivity
+        power_manager = activity.getSystemService(Context.POWER_SERVICE)
+        package_name = activity.getPackageName()
+        if not power_manager.isIgnoringBatteryOptimizations(package_name):
+            intent = Intent()
+            intent.setAction("android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS")
+            intent.setData(Uri.parse(f"package:{package_name}"))
+            activity.startActivity(intent)
+    except Exception as e:
+        print(f"request_ignore_battery_optimizations unavailable (running off-device?): {e}")
+
+
 def open_url_on_device(url):
     """Open a URL/deep-link via an Android ACTION_VIEW intent. No-op (with a
     printed message) when not running on-device, e.g. local testing."""

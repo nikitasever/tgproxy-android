@@ -15,6 +15,7 @@ from kivy.uix.scrollview import ScrollView
 from checker_core import (
     run_check_cycle, STATUS_FILE, get_install_code, is_first_run,
     open_url_on_device, proxy_link, BOT_USERNAME,
+    request_runtime_permissions, request_ignore_battery_optimizations,
 )
 
 BG = (0.055, 0.063, 0.086, 1)
@@ -138,8 +139,10 @@ class TgProxyApp(App):
 
         Clock.schedule_interval(lambda dt: self.refresh_status(), 5)
         self.refresh_status()
+        request_runtime_permissions()
         self.start_background_service()
-        Clock.schedule_once(lambda dt: self._maybe_link_telegram(), 1.5)
+        Clock.schedule_once(lambda dt: request_ignore_battery_optimizations(), 1.0)
+        Clock.schedule_once(lambda dt: self._maybe_link_telegram(), 2.0)
         return root
 
     def _maybe_link_telegram(self):

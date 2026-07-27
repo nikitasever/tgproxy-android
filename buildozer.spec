@@ -16,7 +16,7 @@ services = check:service.py:foreground
 orientation = portrait
 fullscreen = 0
 
-android.permissions = INTERNET,FOREGROUND_SERVICE,POST_NOTIFICATIONS,WAKE_LOCK,RECEIVE_BOOT_COMPLETED
+android.permissions = INTERNET,FOREGROUND_SERVICE,POST_NOTIFICATIONS,WAKE_LOCK,RECEIVE_BOOT_COMPLETED,REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
 android.api = 33
 android.minapi = 24
 android.ndk_api = 24
