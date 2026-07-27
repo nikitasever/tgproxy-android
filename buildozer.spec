@@ -9,7 +9,7 @@ source.include_exts = py,json,png,jpg,kv,atlas
 icon.filename = %(source.dir)s/icon.png
 
 version = 0.1
-requirements = python3,kivy,telethon,pyaes,rsa,pyasn1,pysocks,plyer
+requirements = python3,kivy==2.2.1,kivymd==1.2.0,materialyoucolor,asynckivy,asyncgui,telethon,pyaes,rsa,pyasn1,pysocks,plyer
 
 services = check:service.py:foreground
 

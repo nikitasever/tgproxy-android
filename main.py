@@ -4,14 +4,15 @@ import threading
 import time
 
 from kivy.animation import Animation
-from kivy.app import App
 from kivy.clock import Clock
-from kivy.graphics import Color, RoundedRectangle
-from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.image import Image
-from kivy.uix.label import Label
-from kivy.uix.button import Button
 from kivy.uix.scrollview import ScrollView
+
+from kivymd.app import MDApp
+from kivymd.uix.boxlayout import MDBoxLayout
+from kivymd.uix.button import MDRaisedButton
+from kivymd.uix.card import MDCard
+from kivymd.uix.label import MDLabel
 
 from checker_core import (
     run_check_cycle, STATUS_FILE, get_install_code, is_first_run,
@@ -19,87 +20,62 @@ from checker_core import (
     request_runtime_permissions, request_ignore_battery_optimizations,
 )
 
-BG = (0.055, 0.063, 0.086, 1)
-CARD = (0.11, 0.13, 0.17, 1)
-ROW = (0.14, 0.16, 0.21, 1)
-ROW_BEST = (0.11, 0.20, 0.16, 1)
-ACCENT = (0.20, 0.55, 0.95, 1)
 OK_COLOR = (0.20, 0.75, 0.45, 1)
 ERR_COLOR = (0.90, 0.35, 0.35, 1)
 WARN_COLOR = (0.95, 0.68, 0.20, 1)
-TEXT = (0.93, 0.94, 0.97, 1)
 SUBTEXT = (0.58, 0.62, 0.70, 1)
+ROW_BEST_BG = (0.11, 0.20, 0.16, 1)
+ROW_BG = (0.16, 0.18, 0.23, 1)
+BADGE_BG = (0.26, 0.29, 0.36, 1)
 
 
-class RoundedBox(BoxLayout):
-    def __init__(self, bg=CARD, radius=18, **kwargs):
-        super().__init__(**kwargs)
-        with self.canvas.before:
-            Color(*bg)
-            self._rect = RoundedRectangle(radius=[radius], pos=self.pos, size=self.size)
-        self.bind(pos=self._update_rect, size=self._update_rect)
-
-    def _update_rect(self, *args):
-        self._rect.pos = self.pos
-        self._rect.size = self.size
-
-
-class FlatButton(Button):
-    def __init__(self, bg=ACCENT, fg=(1, 1, 1, 1), **kwargs):
-        super().__init__(**kwargs)
-        self.background_normal = ""
-        self.background_down = ""
-        self.background_color = bg
-        self.color = fg
-        self.bold = True
-        self.font_size = kwargs.get("font_size", "17sp")
-
-
-class ProxyRow(RoundedBox):
+class ProxyRow(MDCard):
     def __init__(self, rank, proxy, stagger=0.0, **kwargs):
         super().__init__(
-            bg=ROW_BEST if rank == 1 else ROW, radius=14,
             orientation="horizontal", padding=[16, 10], spacing=12,
-            size_hint=(1, None), height=68,
+            size_hint=(1, None), height="68dp",
+            radius=[14], elevation=6 if rank == 1 else 2,
+            md_bg_color=ROW_BEST_BG if rank == 1 else ROW_BG,
             opacity=0,
             **kwargs,
         )
-        badge_bg = OK_COLOR if rank == 1 else (0.24, 0.27, 0.34, 1)
-        badge = RoundedBox(bg=badge_bg, radius=16, size_hint=(None, None), size=(32, 32))
-        badge.add_widget(Label(text=str(rank), bold=True, color=(1, 1, 1, 1), font_size="14sp"))
+        badge = MDCard(
+            radius=[16], elevation=0, size_hint=(None, None), size=("32dp", "32dp"),
+            md_bg_color=OK_COLOR if rank == 1 else BADGE_BG,
+        )
+        badge.add_widget(MDLabel(
+            text=str(rank), bold=True, theme_text_color="Custom",
+            text_color=(1, 1, 1, 1), font_style="Body1", halign="center",
+        ))
         self.add_widget(badge)
 
-        info = BoxLayout(orientation="vertical")
-        info.add_widget(Label(
-            text=f"{proxy['server']}:{proxy['port']}", bold=True, color=TEXT,
-            font_size="15sp", halign="left", valign="middle",
-            size_hint=(1, None), height=22, text_size=(None, 22),
+        info = MDBoxLayout(orientation="vertical")
+        info.add_widget(MDLabel(
+            text=f"{proxy['server']}:{proxy['port']}", bold=True,
+            theme_text_color="Primary", font_style="Subtitle1",
+            halign="left", valign="middle", size_hint=(1, None), height="22dp",
         ))
-        info.add_widget(Label(
-            text=f"пинг {proxy.get('latency_ms', '?')} мс", color=SUBTEXT,
-            font_size="12sp", halign="left", valign="middle",
-            size_hint=(1, None), height=18, text_size=(None, 18),
+        info.add_widget(MDLabel(
+            text=f"пинг {proxy.get('latency_ms', '?')} мс", theme_text_color="Custom",
+            text_color=SUBTEXT, font_style="Caption",
+            halign="left", valign="middle", size_hint=(1, None), height="18dp",
         ))
         self.add_widget(info)
 
-        open_btn = FlatButton(
-            text="Открыть", bg=OK_COLOR if rank == 1 else ACCENT,
-            size_hint=(None, None), size=(96, 44), font_size="13sp",
+        open_btn = MDRaisedButton(
+            text="Открыть",
+            md_bg_color=OK_COLOR if rank == 1 else MDApp.get_running_app().theme_cls.primary_color,
+            size_hint=(None, None), size=("96dp", "40dp"),
         )
-        open_btn.bind(on_press=lambda *_: open_url_on_device(proxy_link(proxy)))
+        open_btn.bind(on_release=lambda *_: open_url_on_device(proxy_link(proxy)))
         self.add_widget(open_btn)
 
-        # smooth staggered fade-in cascade, best card first (opacity-only:
-        # BoxLayout repositions children every layout pass, so animating
-        # pos/y here would just fight the parent's own layout)
         anim = Animation(opacity=1, duration=0.35, t="out_quad")
         if rank == 1:
             anim.bind(on_complete=lambda *_: self._start_glow_pulse())
         Clock.schedule_once(lambda dt: anim.start(self), stagger)
 
     def _start_glow_pulse(self):
-        # gentle "breathing" highlight on the top result, built-in opacity
-        # property so no extra canvas bookkeeping is needed
         pulse = (
             Animation(opacity=0.82, duration=1.1, t="in_out_sine")
             + Animation(opacity=1.0, duration=1.1, t="in_out_sine")
@@ -108,53 +84,54 @@ class ProxyRow(RoundedBox):
         pulse.start(self)
 
 
-class TgProxyApp(App):
+class TgProxyApp(MDApp):
     def build(self):
-        from kivy.core.window import Window
-        Window.clearcolor = BG
+        self.theme_cls.theme_style = "Dark"
+        self.theme_cls.primary_palette = "Blue"
 
-        root = BoxLayout(orientation="vertical", padding=[24, 56, 24, 24], spacing=14)
+        root = MDBoxLayout(orientation="vertical", padding=[24, 56, 24, 24], spacing=14)
 
-        header = BoxLayout(orientation="horizontal", size_hint=(1, None), height=48, spacing=14)
+        header = MDBoxLayout(orientation="horizontal", size_hint=(1, None), height="48dp", spacing=14)
         icon_path = os.path.join(os.path.dirname(__file__), "icon.png")
         if os.path.exists(icon_path):
-            header.add_widget(Image(source=icon_path, size_hint=(None, None), size=(44, 44)))
-        title_box = BoxLayout(orientation="vertical", spacing=2)
-        title_box.add_widget(Label(
-            text="TG Proxy Checker", font_size="20sp", bold=True, color=TEXT,
-            halign="left", valign="bottom", size_hint=(1, None), height=26,
-            text_size=(Window.width - 100, 26),
+            header.add_widget(Image(source=icon_path, size_hint=(None, None), size=("44dp", "44dp")))
+        title_box = MDBoxLayout(orientation="vertical", spacing=2)
+        title_box.add_widget(MDLabel(
+            text="TG Proxy Checker", bold=True, font_style="H6",
+            halign="left", valign="bottom", size_hint=(1, None), height="26dp",
         ))
-        title_box.add_widget(Label(
-            text="Автоматический подбор рабочего прокси", font_size="11sp", color=SUBTEXT,
-            halign="left", valign="top", size_hint=(1, None), height=16,
-            text_size=(Window.width - 100, 16),
+        title_box.add_widget(MDLabel(
+            text="Автоматический подбор рабочего прокси", theme_text_color="Custom",
+            text_color=SUBTEXT, font_style="Caption",
+            halign="left", valign="top", size_hint=(1, None), height="16dp",
         ))
         header.add_widget(title_box)
         root.add_widget(header)
 
-        status_row = BoxLayout(orientation="horizontal", size_hint=(1, None), height=40)
-        self.summary_label = Label(
-            text="Ещё не проверялось", font_size="13sp", color=SUBTEXT,
-            halign="left", valign="top", size_hint=(1, 1),
-            text_size=(Window.width - 48, 40),
+        self.summary_label = MDLabel(
+            text="Ещё не проверялось", theme_text_color="Custom", text_color=SUBTEXT,
+            font_style="Body2", halign="left", valign="top",
+            size_hint=(1, None), height="40dp",
         )
-        status_row.add_widget(self.summary_label)
-        root.add_widget(status_row)
+        root.add_widget(self.summary_label)
 
-        self.list_box = BoxLayout(orientation="vertical", spacing=10, size_hint_y=None)
+        self.list_box = MDBoxLayout(orientation="vertical", spacing=10, size_hint_y=None)
         self.list_box.bind(minimum_height=self.list_box.setter("height"))
         scroll = ScrollView(size_hint=(1, 1))
         scroll.add_widget(self.list_box)
         root.add_widget(scroll)
 
-        self.check_btn = FlatButton(text="Проверить сейчас", size_hint=(1, None), height=58)
-        self.check_btn.bind(on_press=self.manual_check)
+        self.check_btn = MDRaisedButton(
+            text="Проверить сейчас", size_hint=(1, None), height="58dp",
+            font_size="16sp",
+        )
+        self.check_btn.bind(on_release=self.manual_check)
         root.add_widget(self.check_btn)
 
-        footer = Label(
-            text="Работает в фоне каждые 30 минут", font_size="11sp", color=SUBTEXT,
-            size_hint=(1, None), height=18,
+        footer = MDLabel(
+            text="Работает в фоне каждые 30 минут", theme_text_color="Custom",
+            text_color=SUBTEXT, font_style="Caption",
+            size_hint=(1, None), height="18dp", halign="left",
         )
         root.add_widget(footer)
 
@@ -185,7 +162,7 @@ class TgProxyApp(App):
     def manual_check(self, instance):
         self.check_btn.disabled = True
         self.check_btn.text = "Проверяю..."
-        self.summary_label.color = SUBTEXT
+        self.summary_label.text_color = SUBTEXT
         self.summary_label.text = "Опрашиваю сервер и проверяю кандидатов..."
         pulse = (
             Animation(opacity=0.55, duration=0.6, t="in_out_sine")
@@ -214,7 +191,7 @@ class TgProxyApp(App):
     def _set_list(self, proxies):
         fingerprint = tuple((p["server"], p["port"], p.get("latency_ms")) for p in proxies)
         if fingerprint == getattr(self, "_last_fingerprint", None):
-            return  # unchanged since last render - skip re-animating the list
+            return
         self._last_fingerprint = fingerprint
         self.list_box.clear_widgets()
         for i, p in enumerate(proxies, start=1):
@@ -229,13 +206,13 @@ class TgProxyApp(App):
             with open(STATUS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
-            self.summary_label.color = ERR_COLOR
+            self.summary_label.text_color = ERR_COLOR
             self.summary_label.text = "Ошибка чтения статуса"
             self._set_list([])
             return
 
         if data.get("error"):
-            self.summary_label.color = ERR_COLOR
+            self.summary_label.text_color = ERR_COLOR
             self.summary_label.text = f"Ошибка проверки: {data['error'].splitlines()[0]}"
             self._set_list([])
             return
@@ -245,10 +222,10 @@ class TgProxyApp(App):
         offline = data.get("offline")
 
         if working:
-            self.summary_label.color = WARN_COLOR if offline else OK_COLOR
+            self.summary_label.text_color = WARN_COLOR if offline else OK_COLOR
             self.summary_label.text = f"✅ Найдено {len(working)} рабочих — проверено {age_min} мин назад"
         else:
-            self.summary_label.color = ERR_COLOR
+            self.summary_label.text_color = ERR_COLOR
             self.summary_label.text = f"❌ Рабочих не найдено — проверено {age_min} мин назад"
 
         if offline:
