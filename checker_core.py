@@ -30,7 +30,7 @@ UPDATE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 _INSECURE_SSL_CONTEXT = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 _INSECURE_SSL_CONTEXT.check_hostname = False
 _INSECURE_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
-TOP_N_TO_TEST = 15
+TOP_N_TO_TEST = 40
 PER_CHECK_TIMEOUT = 12
 
 
