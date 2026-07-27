@@ -30,7 +30,7 @@ UPDATE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 _INSECURE_SSL_CONTEXT = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 _INSECURE_SSL_CONTEXT.check_hostname = False
 _INSECURE_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
-TOP_N_TO_TEST = 40
+TOP_N_TO_TEST = 80
 PER_CHECK_TIMEOUT = 12
 
 
@@ -317,10 +317,11 @@ async def _check_one(api_id, api_hash, candidate):
 async def _find_all_working(cfg, candidates):
     """Test every candidate concurrently (bounded) instead of stopping at the
     first hit - lets the UI show a real list of working proxies to pick
-    from, not just one. Concurrency is kept modest (3) since these checks
-    run over the phone's own (often mobile/weaker) network, not the beefy
-    VPS connection the server-side scan uses."""
-    sem = asyncio.Semaphore(3)
+    from, not just one. Concurrency is kept modest since these checks run
+    over the phone's own (often mobile/weaker) network, not the beefy VPS
+    connection the server-side scan uses; nudged up slightly from 3 now that
+    there are more candidates (80) to get through per run."""
+    sem = asyncio.Semaphore(4)
 
     async def _bounded(c):
         async with sem:
