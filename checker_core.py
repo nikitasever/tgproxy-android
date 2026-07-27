@@ -31,7 +31,7 @@ _INSECURE_SSL_CONTEXT = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 _INSECURE_SSL_CONTEXT.check_hostname = False
 _INSECURE_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
 TOP_N_TO_TEST = 80
-PER_CHECK_TIMEOUT = 12
+PER_CHECK_TIMEOUT = 15
 
 
 def get_install_code():
@@ -173,8 +173,14 @@ def check_for_update():
     api.github.com being unreachable without a VPN is a real possibility
     on this network)."""
     try:
+        # Android's Python build has no system CA bundle wired into the ssl
+        # module, so plain urlopen() cert verification fails even for a
+        # perfectly valid host like api.github.com - use certifi's bundle
+        # explicitly instead of turning verification off.
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
         req = urllib.request.Request(UPDATE_API_URL, headers={"User-Agent": "tgproxycheck-app"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         m = re.search(r"build #(\d+)", data.get("name", ""))
         remote_build = int(m.group(1)) if m else None
@@ -321,11 +327,16 @@ async def _check_one(api_id, api_hash, candidate):
 async def _find_all_working(cfg, candidates):
     """Test every candidate concurrently (bounded) instead of stopping at the
     first hit - lets the UI show a real list of working proxies to pick
-    from, not just one. Concurrency is kept modest since these checks run
-    over the phone's own (often mobile/weaker) network, not the beefy VPS
-    connection the server-side scan uses; nudged up slightly from 3 now that
-    there are more candidates (80) to get through per run."""
-    sem = asyncio.Semaphore(4)
+    from, not just one.
+
+    Concurrency is kept low: Telethon's crypto (AES-IGE for the MTProto
+    handshake) runs in pure Python here (no cryptg/pycryptodome accelerator
+    installed), which is CPU-heavy per connection. Running several of these
+    at once on a phone CPU can make every single one blow past even a
+    generous timeout - a run where literally 100% of candidates time out
+    identically (including ones previously confirmed working) points at
+    that, not at the proxies themselves being down."""
+    sem = asyncio.Semaphore(2)
 
     async def _bounded(c):
         async with sem:
