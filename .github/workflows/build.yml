@@ -1,0 +1,36 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write config.json from secrets
+        run: |
+          cat > config.json <<EOF
+          {
+            "server_host": "${{ secrets.TGPROXY_SERVER_HOST }}",
+            "http_token": "${{ secrets.TGPROXY_HTTP_TOKEN }}",
+            "api_id": ${{ secrets.TGPROXY_API_ID }},
+            "api_hash": "${{ secrets.TGPROXY_API_HASH }}"
+          }
+          EOF
+
+      - name: Build with buildozer
+        uses: ArtemSBulgakov/buildozer-action@v1
+        id: buildozer
+        with:
+          command: buildozer android debug
+          buildozer_version: stable
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tgproxycheck-apk
+          path: ${{ steps.buildozer.outputs.filename }}
