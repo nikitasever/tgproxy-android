@@ -429,9 +429,11 @@ async def _tcp_check(server, port, timeout=TCP_PREFILTER_TIMEOUT):
             await writer.wait_closed()
         except Exception:
             pass
-        return True, elapsed_ms
-    except Exception:
-        return False, None
+        return True, elapsed_ms, None
+    except asyncio.TimeoutError:
+        return False, None, f"таймаут {timeout}с"
+    except Exception as e:
+        return False, None, f"{type(e).__name__}: {e}"
 
 
 async def _check_one(api_id, api_hash, candidate):
@@ -472,16 +474,23 @@ async def _tcp_prefilter(candidates):
     # 80 simultaneous DNS lookups + connects on mobile data was plausibly
     # part of why every single one was timing out together
     sem = asyncio.Semaphore(25)
+    fail_reasons = {}
 
     async def _bounded(c):
         async with sem:
-            ok, tcp_ms = await _tcp_check(c["server"], c["port"])
+            ok, tcp_ms, reason = await _tcp_check(c["server"], c["port"])
+            if not ok:
+                fail_reasons[reason] = fail_reasons.get(reason, 0) + 1
             return (c, tcp_ms) if ok else None
 
     results = await asyncio.gather(*[_bounded(c) for c in candidates])
     alive = [r for r in results if r]
     alive.sort(key=lambda r: r[1])
-    await _log_async(f"↻ TCP: живых {len(alive)} из {len(candidates)}")
+    summary = f"↻ TCP: живых {len(alive)} из {len(candidates)}"
+    if fail_reasons:
+        top = sorted(fail_reasons.items(), key=lambda kv: -kv[1])[:3]
+        summary += " (" + ", ".join(f"{reason}: {count}" for reason, count in top) + ")"
+    await _log_async(summary)
     return [c for c, _tcp_ms in alive]
 
 
