@@ -31,7 +31,7 @@ UPDATE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 _INSECURE_SSL_CONTEXT = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 _INSECURE_SSL_CONTEXT.check_hostname = False
 _INSECURE_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
-TOP_N_TO_TEST = 150
+TOP_N_TO_TEST = 500
 PER_CHECK_TIMEOUT = 15
 TCP_PREFILTER_TIMEOUT = 3
 MTPROTO_CHECK_LIMIT = 30
@@ -363,7 +363,7 @@ def _is_domain_proxy(server):
     return not server.replace(".", "").isdigit()
 
 
-DOMAIN_PROXY_BUDGET = 110
+DOMAIN_PROXY_BUDGET = 500
 
 
 def fetch_candidates(cfg):
@@ -456,7 +456,7 @@ async def _tcp_prefilter(candidates):
     Returns the subset that's actually reachable right now, sorted by TCP
     connect time - throwing out dead hosts here means the slow MTProto
     handshake stage below only ever runs on hosts that are actually up."""
-    sem = asyncio.Semaphore(40)
+    sem = asyncio.Semaphore(80)
 
     async def _bounded(c):
         async with sem:
