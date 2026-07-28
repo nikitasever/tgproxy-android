@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import socket
 import ssl
 import threading
 import time
@@ -426,6 +427,17 @@ def _load_cached_candidates():
         return None
 
 
+async def _resolve_ip(server, port, timeout):
+    """See _tcp_check for why this exists: asyncio's built-in DNS resolution
+    hangs for hostnames on some devices, so resolve manually via a thread
+    instead of letting asyncio.open_connection(host=...) do it internally."""
+    infos = await asyncio.wait_for(
+        asyncio.to_thread(socket.getaddrinfo, server, port, type=socket.SOCK_STREAM),
+        timeout=timeout,
+    )
+    return infos[0][4][0]
+
+
 async def _tcp_check(server, port, timeout=TCP_PREFILTER_TIMEOUT):
     """Cheap liveness probe: just open a raw TCP socket to server:port and
     measure how long the connect takes, no MTProto handshake involved. This
@@ -434,11 +446,22 @@ async def _tcp_check(server, port, timeout=TCP_PREFILTER_TIMEOUT):
     at very high concurrency since it costs almost no CPU, unlike the
     pure-Python MTProto crypto handshake below. Used as a first pass to
     throw out dead hosts fast, before spending the expensive handshake
-    check only on the ones that are actually reachable."""
+    check only on the ones that are actually reachable.
+
+    asyncio's own DNS resolution (its default executor's getaddrinfo, used
+    internally by asyncio.open_connection(host=...)) was found to hang
+    indefinitely for hostnames on some Android devices, even though plain
+    synchronous socket.getaddrinfo (what urllib uses elsewhere in this
+    file) and numeric-IP asyncio connections both work fine there. So we
+    resolve manually via asyncio.to_thread (already proven reliable - see
+    _log_async) and connect to the resolved IP directly, sidestepping
+    whatever's broken in asyncio's own resolver path."""
     start = time.monotonic()
     try:
+        ip = await _resolve_ip(server, port, timeout)
+        remaining = timeout - (time.monotonic() - start)
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(server, port), timeout=timeout
+            asyncio.open_connection(ip, port), timeout=max(remaining, 0.5)
         )
         elapsed_ms = int((time.monotonic() - start) * 1000)
         writer.close()
@@ -447,7 +470,9 @@ async def _tcp_check(server, port, timeout=TCP_PREFILTER_TIMEOUT):
         except Exception:
             pass
         return True, elapsed_ms, None
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, socket.gaierror) as e:
+        if isinstance(e, socket.gaierror):
+            return False, None, f"DNS: {e}"
         return False, None, f"таймаут {timeout}с"
     except Exception as e:
         return False, None, f"{type(e).__name__}: {e}"
@@ -459,6 +484,16 @@ async def _check_one(api_id, api_hash, candidate):
     other exception), so the live log can show the actual cause instead of
     just a flat 'not responding'."""
     server, port, secret = candidate["server"], candidate["port"], candidate["secret"]
+    try:
+        # Telethon's MTProxy connection also resolves the hostname via
+        # asyncio.open_connection(host=...) internally, which hits the same
+        # broken DNS resolution as _tcp_check - resolve to an IP ourselves
+        # first and hand Telethon that instead (MTProxy has no TLS/SNI, so
+        # connecting by IP instead of hostname has no protocol-level effect)
+        server = await _resolve_ip(server, port, PER_CHECK_TIMEOUT)
+    except (asyncio.TimeoutError, socket.gaierror) as e:
+        return False, f"DNS: {e}" if isinstance(e, socket.gaierror) else f"таймаут DNS {PER_CHECK_TIMEOUT}с"
+
     client = TelegramClient(
         None, api_id, api_hash,
         connection=ConnectionTcpMTProxyRandomizedIntermediate,
