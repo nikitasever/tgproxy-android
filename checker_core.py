@@ -21,6 +21,7 @@ LIVE_LOG_FILE = os.path.join(APP_DIR, "live_log.json")
 LIVE_LOG_MAX_LINES = 60
 
 RESULTS_URL_TEMPLATE = "https://{host}:8765/results.json?token={token}"
+CANDIDATES_URL_TEMPLATE = "https://{host}:8765/candidates.json?token={token}"
 NOTIFY_URL_TEMPLATE = "https://{host}:8765/notify?token={token}"
 BOT_USERNAME = "proxy_parserbot"
 GITHUB_REPO = "nikitasever/tgproxy-android"
@@ -376,13 +377,29 @@ def _is_domain_proxy(server):
     return not server.replace(".", "").isdigit()
 
 
-def fetch_candidates(cfg):
-    url = RESULTS_URL_TEMPLATE.format(host=cfg["server_host"], token=cfg["http_token"])
+def _fetch_json(url):
     req = urllib.request.Request(url, headers={"User-Agent": "tgproxy-android"})
     with urllib.request.urlopen(req, timeout=15, context=_INSECURE_SSL_CONTEXT) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+        return json.loads(resp.read().decode("utf-8"))
 
-    all_proxies = data["proxies"]  # already sorted by latency_ms ascending
+
+def fetch_candidates(cfg):
+    # the server only publishes proxies it could itself reach and verify
+    # from its own VPS - but which specific IPs are reachable is heavily
+    # ISP/region dependent (censorship blocklists vary a lot), so a phone
+    # on a restrictive network needs to cast a much wider net than what's
+    # reachable from the VPS's own location. candidates.json is the raw,
+    # unfiltered pool (hundreds of entries) before that server-side
+    # filtering; fall back to the small pre-verified results.json for
+    # compatibility with an older server that doesn't serve it yet.
+    try:
+        url = CANDIDATES_URL_TEMPLATE.format(host=cfg["server_host"], token=cfg["http_token"])
+        all_proxies = _fetch_json(url)["candidates"]
+    except Exception as e:
+        print(f"[tgproxy] candidates.json unavailable ({e}), falling back to results.json")
+        url = RESULTS_URL_TEMPLATE.format(host=cfg["server_host"], token=cfg["http_token"])
+        all_proxies = _fetch_json(url)["proxies"]
+
     domain_proxies = [p for p in all_proxies if _is_domain_proxy(p["server"])]
     ip_proxies = [p for p in all_proxies if not _is_domain_proxy(p["server"])]
     # domain-hosted proxies go first (empirically more reliable), but IP
