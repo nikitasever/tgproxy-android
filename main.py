@@ -328,8 +328,16 @@ class TgProxyApp(MDApp):
     def _poll_download_progress(self, dt):
         status, downloaded, total, err = get_download_progress(self._download_id)
         if status == "running" or status == "pending":
-            pct = int(downloaded * 100 / total) if total > 0 else 0
-            self.update_label.text = f"Загрузка... {pct}%"
+            if total > 0:
+                pct = int(downloaded * 100 / total)
+                self.update_label.text = f"Загрузка... {pct}%"
+            else:
+                # GitHub's release CDN often serves the APK without a
+                # Content-Length header (chunked transfer), so total stays
+                # unknown/-1 the whole time - showing a permanently-stuck
+                # "0%" looked like a hang even while bytes were arriving
+                mb = downloaded / (1024 * 1024)
+                self.update_label.text = f"Загрузка... {mb:.1f} МБ"
             return
         if status == "successful":
             self.update_label.text = "Загружено — жми, чтобы установить"
