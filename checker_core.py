@@ -33,7 +33,11 @@ _INSECURE_SSL_CONTEXT.check_hostname = False
 _INSECURE_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
 TOP_N_TO_TEST = 500
 PER_CHECK_TIMEOUT = 15
-TCP_PREFILTER_TIMEOUT = 3
+# DNS + TCP connect over a real mobile network (cellular/VPN) is much
+# slower and less consistent than on a desktop LAN - a short timeout here
+# was reading as "0 alive" on-device even though the same candidates were
+# genuinely reachable, just not within 3s
+TCP_PREFILTER_TIMEOUT = 6
 MTPROTO_CHECK_LIMIT = 30
 
 
@@ -59,13 +63,20 @@ def is_first_run():
 def request_runtime_permissions():
     """Ask for the dangerous/runtime permissions the app actually needs
     (notifications on Android 13+ won't show without an explicit grant -
-    the manifest entry alone isn't enough)."""
+    the manifest entry alone isn't enough).
+
+    Only requests the ones not already granted - calling
+    request_permissions() unconditionally on every launch was re-prompting
+    the user for notification access each time they opened the app, even
+    after they'd already granted it."""
     try:
-        from android.permissions import request_permissions, Permission
+        from android.permissions import request_permissions, check_permission, Permission
         perms = [Permission.INTERNET, Permission.FOREGROUND_SERVICE, Permission.WAKE_LOCK]
         if hasattr(Permission, "POST_NOTIFICATIONS"):
             perms.append(Permission.POST_NOTIFICATIONS)
-        request_permissions(perms)
+        missing = [p for p in perms if not check_permission(p)]
+        if missing:
+            request_permissions(missing)
     except Exception as e:
         print(f"request_runtime_permissions unavailable (running off-device?): {e}")
 
@@ -365,9 +376,6 @@ def _is_domain_proxy(server):
     return not server.replace(".", "").isdigit()
 
 
-DOMAIN_PROXY_BUDGET = 500
-
-
 def fetch_candidates(cfg):
     url = RESULTS_URL_TEMPLATE.format(host=cfg["server_host"], token=cfg["http_token"])
     req = urllib.request.Request(url, headers={"User-Agent": "tgproxy-android"})
@@ -377,9 +385,11 @@ def fetch_candidates(cfg):
     all_proxies = data["proxies"]  # already sorted by latency_ms ascending
     domain_proxies = [p for p in all_proxies if _is_domain_proxy(p["server"])]
     ip_proxies = [p for p in all_proxies if not _is_domain_proxy(p["server"])]
-    domain_budget = min(DOMAIN_PROXY_BUDGET, TOP_N_TO_TEST)
-    ip_budget = TOP_N_TO_TEST - domain_budget
-    candidates = domain_proxies[:domain_budget] + ip_proxies[:ip_budget]
+    # domain-hosted proxies go first (empirically more reliable), but IP
+    # ones are never fully excluded - a budget that zeroed ip_budget out
+    # once meant a DNS hiccup on just the domain names could tank the
+    # whole run down to 0 candidates actually reachable
+    candidates = (domain_proxies + ip_proxies)[:TOP_N_TO_TEST]
 
     with open(CANDIDATES_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump({"candidates": candidates, "cached_at": time.time()}, f)
@@ -458,7 +468,10 @@ async def _tcp_prefilter(candidates):
     Returns the subset that's actually reachable right now, sorted by TCP
     connect time - throwing out dead hosts here means the slow MTProto
     handshake stage below only ever runs on hosts that are actually up."""
-    sem = asyncio.Semaphore(80)
+    # a phone's radio/DNS resolver chokes far sooner than a desktop's does -
+    # 80 simultaneous DNS lookups + connects on mobile data was plausibly
+    # part of why every single one was timing out together
+    sem = asyncio.Semaphore(25)
 
     async def _bounded(c):
         async with sem:
