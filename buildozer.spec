@@ -22,6 +22,10 @@ android.permissions = INTERNET,FOREGROUND_SERVICE,POST_NOTIFICATIONS,WAKE_LOCK,R
 android.api = 34
 android.minapi = 24
 android.ndk_api = 24
+# buildozer's release build defaults to producing an .aab (Play Store
+# bundle format), which isn't directly installable by sideloading/adb -
+# we distribute a plain APK via GitHub Releases, not the Play Store
+android.release_artifact = apk
 android.archs = arm64-v8a
 
 [buildozer]
