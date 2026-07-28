@@ -236,7 +236,9 @@ def download_update(url):
         request.setNotificationVisibility(Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
         request.setMimeType("application/vnd.android.package-archive")
         request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "tgproxycheck-update.apk")
-        request.setAllowedOverMeteredNetworks(True)
+        # downloads over metered/mobile data are already allowed by default;
+        # setAllowedOverMeteredNetworks() itself isn't resolvable via jnius
+        # reflection on some devices (AttributeError), so don't call it
 
         dm = activity.getSystemService(Context.DOWNLOAD_SERVICE)
         download_id = dm.enqueue(request)
