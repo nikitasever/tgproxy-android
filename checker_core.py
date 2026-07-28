@@ -213,8 +213,11 @@ def check_for_update():
 
 def download_update(url):
     """Hand the APK URL to Android's own DownloadManager - it downloads
-    directly (no browser tab involved) and posts its own system notification
-    that opens the package installer when tapped."""
+    directly (no browser tab involved). Returns (download_id, error); the
+    caller polls get_download_progress() and calls open_downloaded_apk()
+    itself once done, rather than relying on the user noticing (and being
+    allowed to see) DownloadManager's own completed-download notification,
+    which some vendor Android skins suppress silently."""
     try:
         from jnius import autoclass
         Context = autoclass("android.content.Context")
@@ -234,10 +237,75 @@ def download_update(url):
         request.setAllowedOverMeteredNetworks(True)
 
         dm = activity.getSystemService(Context.DOWNLOAD_SERVICE)
-        dm.enqueue(request)
+        download_id = dm.enqueue(request)
+        return download_id, None
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"
+        print(f"download_update failed: {err}")
+        return None, err
+
+
+def get_download_progress(download_id):
+    """Poll DownloadManager for a download started by download_update().
+    Returns (status, downloaded_bytes, total_bytes, error) where status is
+    one of 'pending'/'running'/'paused'/'successful'/'failed'/'unknown'."""
+    try:
+        from jnius import autoclass
+        Context = autoclass("android.content.Context")
+        DownloadManager = autoclass("android.app.DownloadManager")
+        Query = autoclass("android.app.DownloadManager$Query")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        activity = PythonActivity.mActivity
+        dm = activity.getSystemService(Context.DOWNLOAD_SERVICE)
+
+        query = Query()
+        query.setFilterById([download_id])
+        cursor = dm.query(query)
+        try:
+            if not cursor.moveToFirst():
+                return "unknown", 0, 0, None
+            status = cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_STATUS))
+            downloaded = cursor.getLong(cursor.getColumnIndex(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
+            total = cursor.getLong(cursor.getColumnIndex(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
+            reason = cursor.getInt(cursor.getColumnIndex(DownloadManager.COLUMN_REASON))
+        finally:
+            cursor.close()
+
+        status_map = {
+            DownloadManager.STATUS_PENDING: "pending",
+            DownloadManager.STATUS_RUNNING: "running",
+            DownloadManager.STATUS_PAUSED: "paused",
+            DownloadManager.STATUS_SUCCESSFUL: "successful",
+            DownloadManager.STATUS_FAILED: "failed",
+        }
+        status_name = status_map.get(status, "unknown")
+        err = f"код ошибки {reason}" if status_name == "failed" else None
+        return status_name, downloaded, total, err
+    except Exception as e:
+        return "unknown", 0, 0, f"{type(e).__name__}: {e}"
+
+
+def open_downloaded_apk(download_id):
+    """Launch the package installer directly on the file DownloadManager
+    just finished downloading - the URI it hands back is already a proper
+    content:// URI from its own provider, so no FileProvider setup is
+    needed on our side."""
+    try:
+        from jnius import autoclass
+        Context = autoclass("android.content.Context")
+        Intent = autoclass("android.content.Intent")
+        DownloadManager = autoclass("android.app.DownloadManager")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        activity = PythonActivity.mActivity
+        dm = activity.getSystemService(Context.DOWNLOAD_SERVICE)
+        uri = dm.getUriForDownloadedFile(download_id)
+        intent = Intent(Intent.ACTION_VIEW)
+        intent.setDataAndType(uri, "application/vnd.android.package-archive")
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        activity.startActivity(intent)
         return True
     except Exception as e:
-        print(f"download_update failed (running off-device?): {e}")
+        print(f"open_downloaded_apk failed: {e}")
         return False
 
 
@@ -285,12 +353,30 @@ def _save_status(working_list, error=None, offline=False, cache_age_min=None):
     return data
 
 
+def _is_domain_proxy(server):
+    # dedicated proxy-hosting subdomains (e.g. ru04max.freesurfer.club) tend
+    # to be far more reliable in real use than random scraped bare IPs, even
+    # when their raw TCP ping is higher - sorting the whole pool by latency
+    # alone was pushing most of them out of the tested window entirely
+    return not server.replace(".", "").isdigit()
+
+
+DOMAIN_PROXY_BUDGET = 60
+
+
 def fetch_candidates(cfg):
     url = RESULTS_URL_TEMPLATE.format(host=cfg["server_host"], token=cfg["http_token"])
     req = urllib.request.Request(url, headers={"User-Agent": "tgproxy-android"})
     with urllib.request.urlopen(req, timeout=15, context=_INSECURE_SSL_CONTEXT) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    candidates = data["proxies"][:TOP_N_TO_TEST]
+
+    all_proxies = data["proxies"]  # already sorted by latency_ms ascending
+    domain_proxies = [p for p in all_proxies if _is_domain_proxy(p["server"])]
+    ip_proxies = [p for p in all_proxies if not _is_domain_proxy(p["server"])]
+    domain_budget = min(DOMAIN_PROXY_BUDGET, TOP_N_TO_TEST)
+    ip_budget = TOP_N_TO_TEST - domain_budget
+    candidates = domain_proxies[:domain_budget] + ip_proxies[:ip_budget]
+
     with open(CANDIDATES_CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump({"candidates": candidates, "cached_at": time.time()}, f)
     return candidates
@@ -338,7 +424,7 @@ async def _check_one(api_id, api_hash, candidate):
     return ok, reason
 
 
-async def _find_all_working(cfg, candidates):
+async def _find_all_working(cfg, candidates, offline=False, cache_age_min=None):
     """Test every candidate concurrently (bounded) instead of stopping at the
     first hit - lets the UI show a real list of working proxies to pick
     from, not just one.
@@ -349,8 +435,16 @@ async def _find_all_working(cfg, candidates):
     at once on a phone CPU can make every single one blow past even a
     generous timeout - a run where literally 100% of candidates time out
     identically (including ones previously confirmed working) points at
-    that, not at the proxies themselves being down."""
+    that, not at the proxies themselves being down.
+
+    Persists status.json after every single hit (not just once at the end):
+    the UI polls that file, so a working proxy shows up the moment it's
+    found instead of only after all ~80 candidates finish - and if the app
+    process gets killed mid-check (backgrounded and reaped by Android), the
+    results found so far survive instead of vanishing entirely."""
     sem = asyncio.Semaphore(2)
+    working = []
+    save_lock = asyncio.Lock()
 
     async def _bounded(c):
         async with sem:
@@ -358,12 +452,18 @@ async def _find_all_working(cfg, candidates):
             ok, reason = await _check_one(cfg["api_id"], cfg["api_hash"], c)
             suffix = f" ({reason})" if reason else ""
             await _log_async(f"{'✓' if ok else '✗'} {c['server']}:{c['port']} — {'работает' if ok else 'не отвечает'}{suffix}")
+            if ok:
+                async with save_lock:
+                    working.append(c)
+                    working.sort(key=lambda x: x.get("latency_ms", 10 ** 9))
+                    snapshot = list(working)
+                await asyncio.to_thread(_save_status, snapshot, None, offline, cache_age_min)
         return c if ok else None
 
     results = await asyncio.gather(*[_bounded(c) for c in candidates])
-    working = [c for c in results if c]
-    working.sort(key=lambda c: c.get("latency_ms", 10 ** 9))
-    return working
+    final = [c for c in results if c]
+    final.sort(key=lambda c: c.get("latency_ms", 10 ** 9))
+    return final
 
 
 def run_check_cycle():
@@ -400,7 +500,7 @@ def run_check_cycle():
         _log(f"↻ Использую сохранённый список ({len(candidates)} шт., от {cache_age_min} мин назад)")
 
     try:
-        working_list = asyncio.run(_find_all_working(cfg, candidates))
+        working_list = asyncio.run(_find_all_working(cfg, candidates, offline, cache_age_min))
     except Exception as e:
         import traceback
         err_text = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"

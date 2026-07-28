@@ -24,6 +24,7 @@ from checker_core import (
     request_runtime_permissions, request_ignore_battery_optimizations,
     load_live_log, load_config, parse_proxy_input, check_single_proxy,
     get_local_build_number, check_for_update, download_update,
+    get_download_progress, open_downloaded_apk,
 )
 
 OK_COLOR = (0.20, 0.75, 0.45, 1)
@@ -308,10 +309,37 @@ class TgProxyApp(MDApp):
     def _download_update(self, *_):
         if not self._update_apk_url:
             return
-        self.update_btn.text = "Загрузка..."
-        threading.Thread(
-            target=lambda: download_update(self._update_apk_url), daemon=True,
-        ).start()
+        if getattr(self, "_download_id", None) is not None:
+            # already downloaded - this tap means "install now"
+            open_downloaded_apk(self._download_id)
+            return
+        self.update_btn.disabled = True
+        self.update_label.text = "Загрузка... 0%"
+        threading.Thread(target=self._download_update_thread, daemon=True).start()
+
+    def _download_update_thread(self):
+        download_id, err = download_update(self._update_apk_url)
+        if err:
+            Clock.schedule_once(lambda dt: self._show_update_check_error(f"Не удалось начать загрузку: {err}"), 0)
+            return
+        self._download_id = download_id
+        Clock.schedule_interval(self._poll_download_progress, 0.5)
+
+    def _poll_download_progress(self, dt):
+        status, downloaded, total, err = get_download_progress(self._download_id)
+        if status == "running" or status == "pending":
+            pct = int(downloaded * 100 / total) if total > 0 else 0
+            self.update_label.text = f"Загрузка... {pct}%"
+            return
+        if status == "successful":
+            self.update_label.text = "Загружено — жми, чтобы установить"
+            self.update_btn.text = "Установить"
+            self.update_btn.disabled = False
+            return False
+        if status == "failed":
+            self._download_id = None
+            self._show_update_check_error(f"Загрузка не удалась ({err})")
+            return False
 
     # -- proxy check cycle ---------------------------------------------------
 

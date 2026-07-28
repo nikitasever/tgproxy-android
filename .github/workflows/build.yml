@@ -62,6 +62,19 @@ jobs:
             .buildozer
           key: buildozer-${{ hashFiles('buildozer.spec') }}
 
+      - name: Cache Android debug keystore
+        # Keeps the app's debug signature stable across builds regardless of
+        # buildozer.spec changes (which busts the cache above and would
+        # otherwise make Gradle auto-generate a brand new debug keystore
+        # every time). Android refuses to install an update whose signature
+        # doesn't match the currently-installed app, so a changing debug key
+        # was silently breaking every update - both the in-app downloader
+        # and a plain manual reinstall.
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore-v1
+
       - name: Build APK
         run: |
           yes | buildozer android debug
