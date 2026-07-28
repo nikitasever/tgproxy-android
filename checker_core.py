@@ -3,6 +3,7 @@ import json
 import os
 import re
 import ssl
+import threading
 import time
 import urllib.request
 import uuid
@@ -117,20 +118,33 @@ def proxy_tg_uri(proxy):
     return f"tg://proxy?server={proxy['server']}&port={proxy['port']}&secret={proxy['secret']}"
 
 
+_log_lock = threading.Lock()
+
+
 def _log_reset():
     with open(LIVE_LOG_FILE, "w", encoding="utf-8") as f:
         json.dump({"checking": True, "lines": []}, f)
 
 
 def _log(line):
-    try:
-        with open(LIVE_LOG_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        data = {"checking": True, "lines": []}
-    data["lines"] = (data.get("lines") or [])[-(LIVE_LOG_MAX_LINES - 1):] + [line]
-    with open(LIVE_LOG_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f)
+    """Blocking disk I/O - never call this directly from inside a coroutine
+    that's running on the same event loop as the proxy checks (see
+    _log_async). A synchronous file write there stalls the whole loop for
+    its duration, which was silently making in-flight MTProto handshakes
+    miss their real responses and get misreported as timeouts."""
+    with _log_lock:
+        try:
+            with open(LIVE_LOG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {"checking": True, "lines": []}
+        data["lines"] = (data.get("lines") or [])[-(LIVE_LOG_MAX_LINES - 1):] + [line]
+        with open(LIVE_LOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+
+async def _log_async(line):
+    await asyncio.to_thread(_log, line)
 
 
 def _log_finish():
@@ -340,10 +354,10 @@ async def _find_all_working(cfg, candidates):
 
     async def _bounded(c):
         async with sem:
-            _log(f"→ {c['server']}:{c['port']} — проверка MTProto-хендшейка...")
+            await _log_async(f"→ {c['server']}:{c['port']} — проверка MTProto-хендшейка...")
             ok, reason = await _check_one(cfg["api_id"], cfg["api_hash"], c)
             suffix = f" ({reason})" if reason else ""
-            _log(f"{'✓' if ok else '✗'} {c['server']}:{c['port']} — {'работает' if ok else 'не отвечает'}{suffix}")
+            await _log_async(f"{'✓' if ok else '✗'} {c['server']}:{c['port']} — {'работает' if ok else 'не отвечает'}{suffix}")
         return c if ok else None
 
     results = await asyncio.gather(*[_bounded(c) for c in candidates])
