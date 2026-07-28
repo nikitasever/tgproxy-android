@@ -17,7 +17,9 @@ orientation = portrait
 fullscreen = 0
 
 android.permissions = INTERNET,FOREGROUND_SERVICE,POST_NOTIFICATIONS,WAKE_LOCK,RECEIVE_BOOT_COMPLETED,REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,REQUEST_INSTALL_PACKAGES
-android.api = 33
+# targeting an old SDK is one of the signals Play Protect uses to flag a
+# sideloaded APK as "suspicious" / "not optimized for newer Android"
+android.api = 34
 android.minapi = 24
 android.ndk_api = 24
 android.archs = arm64-v8a

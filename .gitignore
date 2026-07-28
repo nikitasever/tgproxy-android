@@ -1,6 +1,7 @@
 config.json
 version.json
 status.json
+release.keystore
 .buildozer/
 bin/
 *.apk

@@ -29,6 +29,10 @@ jobs:
         run: |
           echo '{"build_number": ${{ github.run_number }}}' > version.json
 
+      - name: Write release keystore
+        run: |
+          echo "${{ secrets.TGPROXY_RELEASE_KEYSTORE_B64 }}" | base64 -d > release.keystore
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -62,22 +66,19 @@ jobs:
             .buildozer
           key: buildozer-${{ hashFiles('buildozer.spec') }}
 
-      - name: Cache Android debug keystore
-        # Keeps the app's debug signature stable across builds regardless of
-        # buildozer.spec changes (which busts the cache above and would
-        # otherwise make Gradle auto-generate a brand new debug keystore
-        # every time). Android refuses to install an update whose signature
-        # doesn't match the currently-installed app, so a changing debug key
-        # was silently breaking every update - both the in-app downloader
-        # and a plain manual reinstall.
-        uses: actions/cache@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: android-debug-keystore-v1
-
-      - name: Build APK
+      - name: Build APK (release, signed with our own persistent key)
+        # A real release build signed with a key we control - not just
+        # stable across builds (like the old cached debug-keystore approach)
+        # but signed with a proper release certificate instead of the
+        # widely-shared Android debug cert, which Play Protect treats as a
+        # suspicious-app signal on its own.
+        env:
+          P4A_RELEASE_KEYSTORE: ${{ github.workspace }}/release.keystore
+          P4A_RELEASE_KEYSTORE_PASSWD: ${{ secrets.TGPROXY_RELEASE_KEYSTORE_PASSWORD }}
+          P4A_RELEASE_KEYALIAS: ${{ secrets.TGPROXY_RELEASE_KEY_ALIAS }}
+          P4A_RELEASE_KEYALIAS_PASSWD: ${{ secrets.TGPROXY_RELEASE_KEY_PASSWORD }}
         run: |
-          yes | buildozer android debug
+          yes | buildozer android release
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
