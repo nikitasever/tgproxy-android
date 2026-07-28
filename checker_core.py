@@ -482,11 +482,32 @@ async def _check_one(api_id, api_hash, candidate):
     return ok, reason
 
 
+async def _sanity_check_networking():
+    """Control-group probe against hosts that are almost certainly reachable
+    from any working internet connection (Google DNS's IP directly - no DNS
+    needed at all - and Telegram's own API host). If these also fail, the
+    problem is in this device's/app's networking stack in general, not in
+    the specific proxy candidates being tested."""
+    google_dns, telegram_api = await asyncio.gather(
+        _tcp_check("8.8.8.8", 443),
+        _tcp_check("api.telegram.org", 443),
+    )
+    ok1, ms1, reason1 = google_dns
+    ok2, ms2, reason2 = telegram_api
+    await _log_async(
+        "⚙ Контроль: 8.8.8.8:443 "
+        + (f"OK {ms1}мс" if ok1 else f"FAIL ({reason1})")
+        + " | api.telegram.org:443 "
+        + (f"OK {ms2}мс" if ok2 else f"FAIL ({reason2})")
+    )
+
+
 async def _tcp_prefilter(candidates):
     """Stage 1: raw TCP connect to every candidate, high concurrency, cheap.
     Returns the subset that's actually reachable right now, sorted by TCP
     connect time - throwing out dead hosts here means the slow MTProto
     handshake stage below only ever runs on hosts that are actually up."""
+    await _sanity_check_networking()
     # a phone's radio/DNS resolver chokes far sooner than a desktop's does -
     # 80 simultaneous DNS lookups + connects on mobile data was plausibly
     # part of why every single one was timing out together
