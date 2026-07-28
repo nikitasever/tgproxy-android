@@ -31,8 +31,10 @@ UPDATE_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 _INSECURE_SSL_CONTEXT = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 _INSECURE_SSL_CONTEXT.check_hostname = False
 _INSECURE_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
-TOP_N_TO_TEST = 80
+TOP_N_TO_TEST = 150
 PER_CHECK_TIMEOUT = 15
+TCP_PREFILTER_TIMEOUT = 3
+MTPROTO_CHECK_LIMIT = 30
 
 
 def get_install_code():
@@ -361,7 +363,7 @@ def _is_domain_proxy(server):
     return not server.replace(".", "").isdigit()
 
 
-DOMAIN_PROXY_BUDGET = 60
+DOMAIN_PROXY_BUDGET = 110
 
 
 def fetch_candidates(cfg):
@@ -395,6 +397,31 @@ def _load_cached_candidates():
         return None
 
 
+async def _tcp_check(server, port, timeout=TCP_PREFILTER_TIMEOUT):
+    """Cheap liveness probe: just open a raw TCP socket to server:port and
+    measure how long the connect takes, no MTProto handshake involved. This
+    is what a plain 'ping' check looks like (e.g. the reference Android app
+    at ComradeBingo/Proxy-Telegram-Android does exactly this) - it can run
+    at very high concurrency since it costs almost no CPU, unlike the
+    pure-Python MTProto crypto handshake below. Used as a first pass to
+    throw out dead hosts fast, before spending the expensive handshake
+    check only on the ones that are actually reachable."""
+    start = time.monotonic()
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(server, port), timeout=timeout
+        )
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return True, elapsed_ms
+    except Exception:
+        return False, None
+
+
 async def _check_one(api_id, api_hash, candidate):
     """Returns (ok, reason) - reason is None on success, otherwise a short
     description of why it failed (timeout vs. connection refused vs. some
@@ -424,25 +451,52 @@ async def _check_one(api_id, api_hash, candidate):
     return ok, reason
 
 
+async def _tcp_prefilter(candidates):
+    """Stage 1: raw TCP connect to every candidate, high concurrency, cheap.
+    Returns the subset that's actually reachable right now, sorted by TCP
+    connect time - throwing out dead hosts here means the slow MTProto
+    handshake stage below only ever runs on hosts that are actually up."""
+    sem = asyncio.Semaphore(40)
+
+    async def _bounded(c):
+        async with sem:
+            ok, tcp_ms = await _tcp_check(c["server"], c["port"])
+            return (c, tcp_ms) if ok else None
+
+    results = await asyncio.gather(*[_bounded(c) for c in candidates])
+    alive = [r for r in results if r]
+    alive.sort(key=lambda r: r[1])
+    await _log_async(f"↻ TCP: живых {len(alive)} из {len(candidates)}")
+    return [c for c, _tcp_ms in alive]
+
+
 async def _find_all_working(cfg, candidates, offline=False, cache_age_min=None):
-    """Test every candidate concurrently (bounded) instead of stopping at the
+    """Test candidates concurrently (bounded) instead of stopping at the
     first hit - lets the UI show a real list of working proxies to pick
     from, not just one.
 
-    Concurrency is kept low: Telethon's crypto (AES-IGE for the MTProto
-    handshake) runs in pure Python here (no cryptg/pycryptodome accelerator
-    installed), which is CPU-heavy per connection. Running several of these
-    at once on a phone CPU can make every single one blow past even a
-    generous timeout - a run where literally 100% of candidates time out
-    identically (including ones previously confirmed working) points at
-    that, not at the proxies themselves being down.
+    Two stages: first a cheap TCP-only liveness pass over every candidate
+    (see _tcp_prefilter), then the real MTProto handshake only on the
+    TCP-alive survivors, capped to MTPROTO_CHECK_LIMIT. This matters because
+    Telethon's crypto (AES-IGE for the MTProto handshake) runs in pure
+    Python here (no cryptg/pycryptodome accelerator installed), which is
+    CPU-heavy per connection - running the handshake against every single
+    fetched candidate (including plenty that are simply offline) wasted
+    most of the check budget on hosts that were never going to answer, and
+    kept handshake concurrency low enough that a run could occasionally
+    time out across the board.
 
     Persists status.json after every single hit (not just once at the end):
     the UI polls that file, so a working proxy shows up the moment it's
-    found instead of only after all ~80 candidates finish - and if the app
+    found instead of only after the whole run finishes - and if the app
     process gets killed mid-check (backgrounded and reaped by Android), the
     results found so far survive instead of vanishing entirely."""
-    sem = asyncio.Semaphore(2)
+    alive = await _tcp_prefilter(candidates)
+    to_handshake = alive[:MTPROTO_CHECK_LIMIT]
+    if len(alive) > MTPROTO_CHECK_LIMIT:
+        await _log_async(f"↻ Хендшейк проверяю топ-{MTPROTO_CHECK_LIMIT} из {len(alive)} живых")
+
+    sem = asyncio.Semaphore(4)
     working = []
     save_lock = asyncio.Lock()
 
@@ -460,7 +514,7 @@ async def _find_all_working(cfg, candidates, offline=False, cache_age_min=None):
                 await asyncio.to_thread(_save_status, snapshot, None, offline, cache_age_min)
         return c if ok else None
 
-    results = await asyncio.gather(*[_bounded(c) for c in candidates])
+    results = await asyncio.gather(*[_bounded(c) for c in to_handshake])
     final = [c for c in results if c]
     final.sort(key=lambda c: c.get("latency_ms", 10 ** 9))
     return final
