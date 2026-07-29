@@ -97,6 +97,13 @@ class TgProxyApp(MDApp):
         self.theme_cls.theme_style = "Dark"
         self.theme_cls.primary_palette = "Blue"
 
+        # must exist before the update button can ever be tapped - accessing
+        # a never-set attribute inside _download_update raised AttributeError
+        # on tap, and Kivy has no default handler for exceptions raised from
+        # event dispatch, so that took down the whole app instead of no-oping
+        self._update_apk_url = None
+        self._download_id = None
+
         root = MDBoxLayout(orientation="vertical", padding=[24, 56, 24, 24], spacing=12)
 
         header = MDBoxLayout(orientation="horizontal", size_hint=(1, None), height="48dp", spacing=14)
