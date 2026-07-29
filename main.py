@@ -9,14 +9,13 @@ from kivy.effects.dampedscroll import DampedScrollEffect
 from kivy.metrics import dp
 from kivy.uix.image import Image
 from kivy.uix.scrollview import ScrollView
+from kivy.uix.textinput import TextInput
 
 from kivymd.app import MDApp
 from kivymd.uix.boxlayout import MDBoxLayout
 from kivymd.uix.button import MDRaisedButton, MDIconButton, MDFlatButton
 from kivymd.uix.card import MDCard
-from kivymd.uix.dialog import MDDialog
 from kivymd.uix.label import MDLabel
-from kivymd.uix.textfield import MDTextField
 
 from checker_core import (
     run_check_cycle, STATUS_FILE, get_install_code, is_first_run,
@@ -116,8 +115,41 @@ class TgProxyApp(MDApp):
         ))
         header.add_widget(title_box)
         header.add_widget(MDIconButton(icon="send", on_release=self._relink_telegram))
-        header.add_widget(MDIconButton(icon="magnify", on_release=self.open_manual_check_dialog))
+        header.add_widget(MDIconButton(icon="magnify", on_release=self._toggle_manual_check_panel))
         root.add_widget(header)
+
+        # inline manual-check panel, collapsed by default - a KivyMD
+        # MDDialog with an MDTextField inside crashed natively on-device
+        # (no catchable Python exception, likely a known Kivy+soft-keyboard
+        # issue on some Android skins), so this uses plain Kivy widgets in
+        # an expand/collapse card instead, matching the pattern already
+        # proven safe for terminal_card/update_card below
+        self.manual_check_card = MDCard(
+            orientation="vertical", padding=[14, 10], spacing=8,
+            size_hint=(1, None), height=0, opacity=0,
+            radius=[12], md_bg_color=ROW_BG,
+        )
+        self._check_field = TextInput(
+            hint_text="server:port:secret или ссылка t.me/proxy",
+            multiline=False, size_hint=(1, None), height="40dp",
+            background_color=(0.1, 0.11, 0.14, 1), foreground_color=(1, 1, 1, 1),
+            hint_text_color=SUBTEXT, cursor_color=(1, 1, 1, 1), padding=[10, 10],
+        )
+        self.manual_check_card.add_widget(self._check_field)
+        manual_check_row = MDBoxLayout(orientation="horizontal", spacing=10, size_hint=(1, None), height="40dp")
+        check_now_btn = MDRaisedButton(text="Проверить", size_hint=(None, None), size=("120dp", "40dp"))
+        check_now_btn.bind(on_release=self._run_manual_single_check)
+        manual_check_row.add_widget(check_now_btn)
+        close_btn = MDFlatButton(text="Закрыть", size_hint=(None, None), size=("100dp", "40dp"))
+        close_btn.bind(on_release=self._toggle_manual_check_panel)
+        manual_check_row.add_widget(close_btn)
+        self.manual_check_card.add_widget(manual_check_row)
+        self._check_result_label = MDLabel(
+            text="", theme_text_color="Custom", text_color=SUBTEXT,
+            font_style="Caption", size_hint=(1, None), height="20dp",
+        )
+        self.manual_check_card.add_widget(self._check_result_label)
+        root.add_widget(self.manual_check_card)
 
         self.update_card = MDCard(
             orientation="horizontal", padding=[14, 8], spacing=10,
@@ -217,41 +249,14 @@ class TgProxyApp(MDApp):
         except Exception as e:
             print(f"start_background_service unavailable (running off-device?): {e}")
 
-    # -- manual single-proxy check dialog ----------------------------------
+    # -- manual single-proxy check panel -------------------------------------
 
-    def open_manual_check_dialog(self, *_):
-        # this whole flow was never confirmed working on-device after the
-        # KivyMD/API-34 changes - guard it so a crash here shows a readable
-        # error in the UI instead of killing the app with no diagnostics
-        try:
-            self._check_field = MDTextField(
-                hint_text="Ссылка t.me/proxy или server:port:secret",
-                mode="rectangle",
-            )
-            self._check_result_label = MDLabel(
-                text="", theme_text_color="Custom", text_color=SUBTEXT,
-                font_style="Caption", size_hint_y=None, height="20dp",
-            )
-            content = MDBoxLayout(
-                orientation="vertical", spacing=10, size_hint_y=None, height="100dp",
-            )
-            content.add_widget(self._check_field)
-            content.add_widget(self._check_result_label)
-            self._check_dialog = MDDialog(
-                title="Проверить прокси вручную",
-                type="custom",
-                content_cls=content,
-                buttons=[
-                    MDFlatButton(text="Закрыть", on_release=lambda *_: self._check_dialog.dismiss()),
-                    MDRaisedButton(text="Проверить", on_release=self._run_manual_single_check),
-                ],
-            )
-            self._check_dialog.open()
-        except Exception as e:
-            import traceback
-            print(f"open_manual_check_dialog crashed: {e}\n{traceback.format_exc()}")
-            self.summary_label.text_color = ERR_COLOR
-            self.summary_label.text = f"Ошибка окна проверки: {type(e).__name__}: {e}"
+    def _toggle_manual_check_panel(self, *_):
+        opening = self.manual_check_card.height < 10
+        target_height = dp(130) if opening else 0
+        Animation(height=target_height, opacity=1 if opening else 0, duration=0.25, t="out_quad").start(self.manual_check_card)
+        if opening:
+            Clock.schedule_once(lambda dt: setattr(self._check_field, "focus", True), 0.3)
 
     def _run_manual_single_check(self, *_):
         parsed = parse_proxy_input(self._check_field.text.strip())
