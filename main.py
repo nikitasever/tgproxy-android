@@ -220,29 +220,38 @@ class TgProxyApp(MDApp):
     # -- manual single-proxy check dialog ----------------------------------
 
     def open_manual_check_dialog(self, *_):
-        self._check_field = MDTextField(
-            hint_text="Ссылка t.me/proxy или server:port:secret",
-            mode="rectangle",
-        )
-        self._check_result_label = MDLabel(
-            text="", theme_text_color="Custom", text_color=SUBTEXT,
-            font_style="Caption", size_hint_y=None, height="20dp",
-        )
-        content = MDBoxLayout(
-            orientation="vertical", spacing=10, size_hint_y=None, height="100dp",
-        )
-        content.add_widget(self._check_field)
-        content.add_widget(self._check_result_label)
-        self._check_dialog = MDDialog(
-            title="Проверить прокси вручную",
-            type="custom",
-            content_cls=content,
-            buttons=[
-                MDFlatButton(text="Закрыть", on_release=lambda *_: self._check_dialog.dismiss()),
-                MDRaisedButton(text="Проверить", on_release=self._run_manual_single_check),
-            ],
-        )
-        self._check_dialog.open()
+        # this whole flow was never confirmed working on-device after the
+        # KivyMD/API-34 changes - guard it so a crash here shows a readable
+        # error in the UI instead of killing the app with no diagnostics
+        try:
+            self._check_field = MDTextField(
+                hint_text="Ссылка t.me/proxy или server:port:secret",
+                mode="rectangle",
+            )
+            self._check_result_label = MDLabel(
+                text="", theme_text_color="Custom", text_color=SUBTEXT,
+                font_style="Caption", size_hint_y=None, height="20dp",
+            )
+            content = MDBoxLayout(
+                orientation="vertical", spacing=10, size_hint_y=None, height="100dp",
+            )
+            content.add_widget(self._check_field)
+            content.add_widget(self._check_result_label)
+            self._check_dialog = MDDialog(
+                title="Проверить прокси вручную",
+                type="custom",
+                content_cls=content,
+                buttons=[
+                    MDFlatButton(text="Закрыть", on_release=lambda *_: self._check_dialog.dismiss()),
+                    MDRaisedButton(text="Проверить", on_release=self._run_manual_single_check),
+                ],
+            )
+            self._check_dialog.open()
+        except Exception as e:
+            import traceback
+            print(f"open_manual_check_dialog crashed: {e}\n{traceback.format_exc()}")
+            self.summary_label.text_color = ERR_COLOR
+            self.summary_label.text = f"Ошибка окна проверки: {type(e).__name__}: {e}"
 
     def _run_manual_single_check(self, *_):
         parsed = parse_proxy_input(self._check_field.text.strip())
